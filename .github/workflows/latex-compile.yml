@@ -1,0 +1,45 @@
+name: Compile LaTeX to PDF
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'proposal.tex'
+      - 'refs.bib'
+      - 'APS360.sty'
+      - '.github/workflows/latex-compile.yml'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install LaTeX
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y texlive texlive-latex-extra texlive-fonts-recommended
+    
+    - name: Compile LaTeX
+      run: |
+        pdflatex -interaction=nonstopmode proposal.tex
+        bibtex proposal
+        pdflatex -interaction=nonstopmode proposal.tex
+        pdflatex -interaction=nonstopmode proposal.tex
+    
+    - name: Upload PDF artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: proposal-pdf
+        path: proposal.pdf
+    
+    - name: Commit and push PDF
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add proposal.pdf
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-generate PDF from LaTeX" && git push)
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
