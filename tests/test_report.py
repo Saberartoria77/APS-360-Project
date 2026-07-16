@@ -55,3 +55,8 @@ def test_compiled_report_has_three_main_pages_plus_references() -> None:
     assert len(reader.pages) == 4
     assert "Feasibility and next steps" in (reader.pages[2].extract_text() or "")
     assert "References" in (reader.pages[3].extract_text() or "")
+
+
+def test_report_uses_numeric_square_bracket_citations() -> None:
+    text = Path("progress_report.tex").read_text()
+    assert r"\setcitestyle{numbers,square}" in text
