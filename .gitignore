@@ -2,4 +2,5 @@
 *.log 
 *.out 
 *.bbl 
-*.blg
+*.blg 
+.worktrees/
