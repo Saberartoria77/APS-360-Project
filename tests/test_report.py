@@ -60,3 +60,14 @@ def test_compiled_report_has_three_main_pages_plus_references() -> None:
 def test_report_uses_numeric_square_bracket_citations() -> None:
     text = Path("progress_report.tex").read_text()
     assert r"\setcitestyle{numbers,square}" in text
+
+
+def test_report_reuses_shared_bibliography() -> None:
+    text = Path("progress_report.tex").read_text()
+    assert r"\bibliography{refs}" in text
+    assert not Path("progress_refs.bib").exists()
+
+
+def test_report_links_public_github_repository() -> None:
+    text = Path("progress_report.tex").read_text()
+    assert r"\href{https://github.com/Saberartoria77/APS-360-Project}{GitHub repository}" in text
