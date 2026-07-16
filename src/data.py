@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,128 @@ FEATURE_COLUMNS = [
     "volatility_24h",
     "volume_z_24h",
 ]
+
+
+@dataclass
+class DatasetBundle:
+    x_train: np.ndarray
+    y_train: np.ndarray
+    x_val: np.ndarray
+    y_val: np.ndarray
+    x_test: np.ndarray
+    y_test: np.ndarray
+    train_times: np.ndarray
+    val_times: np.ndarray
+    test_times: np.ndarray
+    train_symbols: np.ndarray
+    val_symbols: np.ndarray
+    test_symbols: np.ndarray
+    feature_names: list[str]
+    scaler_mean: np.ndarray
+    scaler_scale: np.ndarray
+    threshold: float
+
+
+def prepare_datasets(
+    frames: dict[str, pd.DataFrame],
+    window: int = 96,
+    train_fraction: float = 0.70,
+    val_fraction: float = 0.15,
+) -> DatasetBundle:
+    """Create per-asset windows with chronological splits and training-only scaling."""
+    if not frames:
+        raise ValueError("at least one symbol frame is required")
+    if window < 2:
+        raise ValueError("window must be at least two")
+    if not 0 < train_fraction < 1 or not 0 < val_fraction < 1:
+        raise ValueError("split fractions must be between zero and one")
+    if train_fraction + val_fraction >= 1:
+        raise ValueError("train_fraction + val_fraction must be below one")
+
+    for symbol, frame in frames.items():
+        required = {"close", *FEATURE_COLUMNS}
+        missing = required.difference(frame.columns)
+        if missing:
+            raise ValueError(f"{symbol} is missing columns: {sorted(missing)}")
+        if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+            raise ValueError(f"{symbol} index must be unique and chronological")
+
+    all_times = pd.DatetimeIndex(sorted(set().union(*(frame.index for frame in frames.values()))))
+    train_count = int(len(all_times) * train_fraction)
+    val_count = int(len(all_times) * val_fraction)
+    if min(train_count, val_count, len(all_times) - train_count - val_count) <= window:
+        raise ValueError("each chronological split must contain more rows than the window")
+    train_end = all_times[train_count - 1]
+    val_start = all_times[train_count]
+    val_end = all_times[train_count + val_count - 1]
+    test_start = all_times[train_count + val_count]
+
+    training_returns = []
+    training_feature_rows = []
+    for frame in frames.values():
+        train = frame.loc[frame.index <= train_end]
+        training_returns.append(train["close"].shift(-1).div(train["close"]).sub(1.0).dropna().abs())
+        training_feature_rows.append(train.iloc[:-1][FEATURE_COLUMNS])
+    threshold = float(np.clip(pd.concat(training_returns).median(), 0.001, 0.01))
+    training_features = pd.concat(training_feature_rows).dropna()
+    scaler_mean = training_features.mean().to_numpy(dtype=np.float64)
+    scaler_scale = training_features.std(ddof=0).to_numpy(dtype=np.float64)
+    scaler_scale = np.where(scaler_scale == 0.0, 1.0, scaler_scale)
+
+    split_ranges = {
+        "train": (all_times[0], train_end),
+        "val": (val_start, val_end),
+        "test": (test_start, all_times[-1]),
+    }
+    collected: dict[str, dict[str, list]] = {
+        name: {"x": [], "y": [], "times": [], "symbols": []} for name in split_ranges
+    }
+    for symbol, frame in frames.items():
+        for split_name, (split_start, split_end) in split_ranges.items():
+            subset = frame.loc[(frame.index >= split_start) & (frame.index <= split_end)].copy()
+            subset["label"] = make_direction_labels(subset["close"], horizon=1, threshold=threshold)
+            subset = subset.dropna(subset=[*FEATURE_COLUMNS, "label"])
+            feature_values = subset[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
+            feature_values = (feature_values - scaler_mean) / scaler_scale
+            labels = subset["label"].to_numpy(dtype=np.int64)
+            times = subset.index.to_numpy()
+            for end_position in range(window - 1, len(subset)):
+                start_position = end_position - window + 1
+                collected[split_name]["x"].append(feature_values[start_position : end_position + 1])
+                collected[split_name]["y"].append(labels[end_position])
+                collected[split_name]["times"].append(times[end_position])
+                collected[split_name]["symbols"].append(symbol)
+
+    arrays = {}
+    for split_name, values in collected.items():
+        if not values["x"]:
+            raise ValueError(f"{split_name} split produced no complete windows")
+        order = np.argsort(np.asarray(values["times"]))
+        arrays[split_name] = {
+            "x": np.asarray(values["x"], dtype=np.float32)[order],
+            "y": np.asarray(values["y"], dtype=np.int64)[order],
+            "times": np.asarray(values["times"])[order],
+            "symbols": np.asarray(values["symbols"])[order],
+        }
+
+    return DatasetBundle(
+        x_train=arrays["train"]["x"],
+        y_train=arrays["train"]["y"],
+        x_val=arrays["val"]["x"],
+        y_val=arrays["val"]["y"],
+        x_test=arrays["test"]["x"],
+        y_test=arrays["test"]["y"],
+        train_times=arrays["train"]["times"],
+        val_times=arrays["val"]["times"],
+        test_times=arrays["test"]["times"],
+        train_symbols=arrays["train"]["symbols"],
+        val_symbols=arrays["val"]["symbols"],
+        test_symbols=arrays["test"]["symbols"],
+        feature_names=list(FEATURE_COLUMNS),
+        scaler_mean=scaler_mean,
+        scaler_scale=scaler_scale,
+        threshold=threshold,
+    )
 
 
 def make_direction_labels(
