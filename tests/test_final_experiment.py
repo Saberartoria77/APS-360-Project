@@ -9,8 +9,11 @@ import pytest
 from run_final_experiment import (
     HISTORICAL_END,
     HISTORICAL_START,
+    PROSPECTIVE_CONTEXT_END,
+    PROSPECTIVE_CONTEXT_START,
     _validate_hourly_frame,
     run_historical_stage,
+    run_prospective_stage,
 )
 from src.final_evaluation import (
     aggregate_seed_metrics,
@@ -19,6 +22,80 @@ from src.final_evaluation import (
     transfer_pairs,
 )
 from src.persistence import load_frozen_package
+
+
+def test_prospective_stage_refuses_to_run_without_frozen_manifest(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="incomplete frozen package"):
+        run_prospective_stage(tmp_path, dry_run=True)
+
+
+def test_prospective_validates_frozen_mode_before_market_data(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_historical_stage(tmp_path, dry_run=True, epochs=1, seeds=(42,))
+
+    def forbid_data_access(*args, **kwargs):
+        raise AssertionError("market data accessed before frozen-package rejection")
+
+    monkeypatch.setattr("run_final_experiment.fetch_klines", forbid_data_access)
+    with pytest.raises(ValueError, match="data mode"):
+        run_prospective_stage(tmp_path, dry_run=False)
+
+
+def test_prospective_dry_run_scores_only_july_and_writes_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def forbid_network(*args, **kwargs):
+        raise AssertionError("dry run attempted network access")
+
+    monkeypatch.setattr("run_final_experiment.fetch_klines", forbid_network)
+    run_historical_stage(tmp_path, dry_run=True, epochs=1, seeds=(42,))
+    result = run_prospective_stage(tmp_path, dry_run=True)
+
+    assert result["configuration"]["prospective_revealed"] is True
+    assert result["configuration"]["data_mode"] == "synthetic"
+    assert result["data"]["target_start"] == "2026-07-01T00:00:00Z"
+    assert result["data"]["target_end"] == "2026-08-01T00:00:00Z"
+    assert result["data"]["source_start"] == PROSPECTIVE_CONTEXT_START
+    assert result["data"]["source_end_exclusive"] == PROSPECTIVE_CONTEXT_END
+    assert result["data"]["sample_count"] == 31 * 24 * 2
+    assert sum(result["data"]["class_counts"]) == result["data"]["sample_count"]
+    required = [
+        "prospective_results.json",
+        "qualitative_examples.csv",
+        "figures/regime_performance.png",
+        "figures/prospective_confusion.png",
+        "figures/model_regime_diagram.png",
+    ]
+    assert all((tmp_path / name).is_file() for name in required)
+    assert all((tmp_path / name).stat().st_size > 0 for name in required)
+
+    persisted = json.loads((tmp_path / "prospective_results.json").read_text())
+    assert persisted == result
+    assert persisted["selected_model"] == "cnn_lstm"
+    assert set(persisted["slices"]["overall"]["models"]) == {
+        "majority",
+        "momentum",
+        "logistic_regression",
+        "cnn_lstm",
+    }
+
+    examples = pd.read_csv(tmp_path / "qualitative_examples.csv")
+    assert set(examples["regime"]).issubset({"low", "medium", "high"})
+    assert set(examples["example_type"]).issubset({"correct", "error"})
+    assert examples.groupby(["regime", "example_type"]).size().max() == 1
+
+
+def test_prospective_dry_run_is_deterministic_for_same_frozen_package(
+    tmp_path: Path,
+) -> None:
+    run_historical_stage(tmp_path, dry_run=True, epochs=1, seeds=(42,))
+    first = run_prospective_stage(tmp_path, dry_run=True)
+    first_examples = (tmp_path / "qualitative_examples.csv").read_bytes()
+    second = run_prospective_stage(tmp_path, dry_run=True)
+
+    assert first == second
+    assert (tmp_path / "qualitative_examples.csv").read_bytes() == first_examples
 
 
 def test_transfer_matrix_contains_all_low_high_combinations() -> None:

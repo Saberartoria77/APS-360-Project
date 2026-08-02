@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 
 from src.evaluation import classification_metrics
@@ -123,3 +129,86 @@ def aggregate_seed_metrics(seed_results: list[dict]) -> dict:
         for index, name in enumerate(("down", "flat", "up"))
     }
     return output
+
+
+def save_regime_performance_figure(slices: dict, destination: Path) -> Path:
+    """Plot prospective macro-F1 by regime for every frozen model."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    regime_names = [
+        regime for regime in ("low", "medium", "high") if f"regime_{regime}" in slices
+    ]
+    if not regime_names:
+        raise ValueError("at least one regime slice is required for the figure")
+    models = list(slices[f"regime_{regime_names[0]}"]["models"])
+    positions = np.arange(len(regime_names), dtype=float)
+    width = 0.8 / len(models)
+    figure, axis = plt.subplots(figsize=(6.5, 3.4))
+    for model_index, model in enumerate(models):
+        values = [
+            slices[f"regime_{regime}"]["models"][model]["macro_f1"]
+            for regime in regime_names
+        ]
+        offset = (model_index - (len(models) - 1) / 2) * width
+        axis.bar(positions + offset, values, width=width, label=model.replace("_", " ").title())
+    axis.set(
+        title="Prospective performance across volatility regimes",
+        xlabel="Frozen volatility regime",
+        ylabel="Macro-F1",
+        xticks=positions,
+        xticklabels=[name.title() for name in regime_names],
+        ylim=(0.0, 1.0),
+    )
+    axis.legend(frameon=False, fontsize=8, ncol=2)
+    axis.grid(axis="y", alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(destination, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+    return destination
+
+
+def save_model_regime_diagram(destination: Path) -> Path:
+    """Render the frozen preprocessing, CNN-LSTM, and regime-analysis flow."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    boxes = [
+        (0.09, 0.50, "Hourly BTC / ETH\ncausal features", "#E8F1FA"),
+        (0.28, 0.50, "Frozen scaling\n96 x 13 window", "#D5E8D4"),
+        (0.50, 0.72, "Conv1D + LSTM\n3-class softmax", "#FFF2CC"),
+        (0.70, 0.72, "Down / Flat / Up\nnext-hour forecast", "#F8CECC"),
+        (0.60, 0.27, "Frozen 168 h volatility\nLow / Medium / High", "#E1D5E7"),
+        (0.91, 0.50, "Slice metrics +\nqualitative examples", "#DAE8FC"),
+    ]
+    figure, axis = plt.subplots(figsize=(10.4, 2.2))
+    axis.axis("off")
+    for x, y, label, color in boxes:
+        axis.text(
+            x,
+            y,
+            label,
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            bbox={"boxstyle": "round,pad=0.45", "facecolor": color, "edgecolor": "#555555"},
+        )
+    arrows = [
+        ((0.15, 0.50), (0.22, 0.50)),
+        ((0.35, 0.55), (0.43, 0.68)),
+        ((0.35, 0.45), (0.51, 0.30)),
+        ((0.57, 0.72), (0.63, 0.72)),
+        ((0.77, 0.69), (0.84, 0.56)),
+        ((0.69, 0.30), (0.84, 0.45)),
+    ]
+    for start, end in arrows:
+        axis.annotate(
+            "",
+            xy=end,
+            xytext=start,
+            arrowprops={"arrowstyle": "->", "lw": 1.2, "color": "#555555"},
+        )
+    axis.set_xlim(0, 1)
+    axis.set_ylim(0, 1)
+    figure.tight_layout()
+    figure.savefig(destination, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+    return destination

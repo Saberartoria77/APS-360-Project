@@ -89,3 +89,60 @@ def representative_predictions(
                 }
             )
     return pd.DataFrame.from_records(records)
+
+
+def representative_predictions_by_regime(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    probabilities: np.ndarray,
+    timestamps: np.ndarray,
+    symbols: np.ndarray,
+    regimes: np.ndarray,
+) -> pd.DataFrame:
+    """Select one confident correct and error deterministically per non-empty regime."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    probabilities = np.asarray(probabilities)
+    timestamps = np.asarray(timestamps)
+    symbols = np.asarray(symbols)
+    regimes = np.asarray(regimes)
+    sample_shape = y_true.shape
+    if (
+        y_true.ndim != 1
+        or y_pred.shape != sample_shape
+        or timestamps.shape != sample_shape
+        or symbols.shape != sample_shape
+        or regimes.shape != sample_shape
+        or probabilities.shape != (len(y_true), 3)
+        or not np.all(np.isfinite(probabilities))
+    ):
+        raise ValueError("qualitative prediction inputs must be aligned and finite")
+
+    frames = []
+    for regime in ("low", "medium", "high"):
+        mask = regimes == regime
+        if not mask.any():
+            continue
+        selected = representative_predictions(
+            y_true[mask],
+            y_pred[mask],
+            probabilities[mask],
+            timestamps[mask],
+            symbols[mask],
+            examples_per_type=1,
+        )
+        selected.insert(0, "regime", regime)
+        frames.append(selected)
+    columns = [
+        "regime",
+        "example_type",
+        "timestamp",
+        "symbol",
+        "true_class",
+        "predicted_class",
+        "confidence",
+        "p_down",
+        "p_flat",
+        "p_up",
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)

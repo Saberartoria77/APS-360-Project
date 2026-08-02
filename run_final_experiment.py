@@ -12,15 +12,33 @@ import pandas as pd
 
 from run_experiment import SYMBOLS, _synthetic_ohlcv
 from src.baselines import fit_baseline_models, predict_baselines
-from src.data import FEATURE_COLUMNS, DatasetBundle, engineer_features, fetch_klines, prepare_datasets
-from src.evaluation import classification_metrics
+from src.data import (
+    FEATURE_COLUMNS,
+    DatasetBundle,
+    engineer_features,
+    fetch_klines,
+    prepare_datasets,
+    prepare_evaluation_windows,
+)
+from src.evaluation import (
+    classification_metrics,
+    representative_predictions_by_regime,
+    save_confusion_matrix,
+)
 from src.final_evaluation import (
     aggregate_seed_metrics,
     evaluate_slices,
     paired_transfer_changes,
+    save_model_regime_diagram,
+    save_regime_performance_figure,
     transfer_pairs,
 )
-from src.persistence import create_frozen_manifest, save_frozen_package
+from src.persistence import (
+    create_frozen_manifest,
+    load_frozen_package,
+    predict_frozen_probabilities,
+    save_frozen_package,
+)
 from src.regimes import (
     RegimeThresholds,
     assign_regimes,
@@ -35,10 +53,13 @@ HISTORICAL_START = "2023-07-01"
 HISTORICAL_END = "2026-07-01"
 PROSPECTIVE_START = "2026-07-01T00:00:00Z"
 PROSPECTIVE_END = "2026-08-01T00:00:00Z"
+PROSPECTIVE_CONTEXT_START = "2026-06-24T00:00:00Z"
+PROSPECTIVE_CONTEXT_END = "2026-08-01T01:00:00Z"
 SEEDS = (42, 43, 44)
 SYNTHETIC_HISTORICAL_START = "2024-01-01T00:00:00Z"
 SYNTHETIC_HISTORICAL_END = "2024-02-11T16:00:00Z"
 SYNTHETIC_HISTORICAL_ROWS = 1000
+SYNTHETIC_PROSPECTIVE_ROWS = 1100
 
 
 def _validate_hourly_frame(
@@ -450,6 +471,180 @@ def run_historical_stage(
     return results
 
 
+def _prospective_raw_frames(dry_run: bool) -> dict[str, pd.DataFrame]:
+    """Load the exact causal context, with deterministic synthetic data for tests."""
+    context_start = pd.Timestamp(PROSPECTIVE_CONTEXT_START)
+    context_end = pd.Timestamp(PROSPECTIVE_CONTEXT_END)
+    frames = {}
+    for symbol in SYMBOLS:
+        if dry_run:
+            generated = _synthetic_ohlcv(symbol, periods=SYNTHETIC_PROSPECTIVE_ROWS)
+            generated.index = pd.date_range(
+                context_end - pd.Timedelta(hours=SYNTHETIC_PROSPECTIVE_ROWS),
+                periods=SYNTHETIC_PROSPECTIVE_ROWS,
+                freq="h",
+                tz="UTC",
+            )
+            frame = generated.loc[(generated.index >= context_start) & (generated.index < context_end)]
+        else:
+            frame = fetch_klines(
+                symbol,
+                context_start,
+                context_end,
+                cache_path=Path("data/raw")
+                / f"{symbol}_1h_2026-06-24_2026-08-01T01.csv",
+            )
+        _validate_prospective_frame(symbol, frame)
+        frames[symbol] = frame
+    return frames
+
+
+def _validate_prospective_frame(symbol: str, frame: pd.DataFrame) -> None:
+    """Reject incomplete or future-extended prospective source coverage."""
+    if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
+        raise ValueError(f"{symbol} prospective index must be timezone-aware")
+    if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        raise ValueError(f"{symbol} prospective index must be unique and chronological")
+    if not np.all(np.diff(frame.index.asi8) == pd.Timedelta(hours=1).value):
+        raise ValueError(f"{symbol} prospective index must be hourly contiguous")
+    start = pd.Timestamp(PROSPECTIVE_CONTEXT_START)
+    end = pd.Timestamp(PROSPECTIVE_CONTEXT_END)
+    expected_rows = int((end - start) / pd.Timedelta(hours=1))
+    if (
+        len(frame) != expected_rows
+        or frame.index[0] != start
+        or frame.index[-1] != end - pd.Timedelta(hours=1)
+    ):
+        raise ValueError(f"{symbol} must have exact prospective context coverage")
+
+
+def run_prospective_stage(
+    output_dir: Path | str = Path("artifacts/final"),
+    dry_run: bool = False,
+) -> dict:
+    """Reveal and score July targets once using a complete frozen package."""
+    output_dir = Path(output_dir)
+    data_mode = "synthetic" if dry_run else "genuine"
+
+    # This integrity gate intentionally precedes all market-data construction or access.
+    manifest, cnn_state, baselines = load_frozen_package(
+        output_dir / "frozen", expected_data_mode=data_mode
+    )
+    if (
+        manifest.schema_version != "frozen-package-v1"
+        or manifest.data_mode != data_mode
+        or manifest.feature_names != tuple(FEATURE_COLUMNS)
+        or manifest.window != 96
+        or manifest.prospective_start != PROSPECTIVE_START
+        or manifest.prospective_end != PROSPECTIVE_END
+    ):
+        raise ValueError("frozen manifest does not match the prospective experiment")
+
+    raw_frames = _prospective_raw_frames(dry_run)
+    feature_frames = {
+        symbol: engineer_features(frame) for symbol, frame in raw_frames.items()
+    }
+    dataset = prepare_evaluation_windows(
+        feature_frames,
+        feature_names=list(manifest.feature_names),
+        scaler_mean=np.asarray(manifest.scaler_mean, dtype=np.float64),
+        scaler_scale=np.asarray(manifest.scaler_scale, dtype=np.float64),
+        threshold=manifest.threshold,
+        window=manifest.window,
+        target_start=pd.Timestamp(manifest.prospective_start),
+        target_end=pd.Timestamp(manifest.prospective_end),
+    )
+    target_start = np.datetime64("2026-07-01T00:00:00")
+    target_end = np.datetime64("2026-08-01T00:00:00")
+    if not np.all((dataset.times >= target_start) & (dataset.times < target_end)):
+        raise ValueError("prospective scoring produced targets outside July 2026")
+
+    thresholds = RegimeThresholds(
+        by_symbol={
+            symbol: tuple(float(value) for value in values)
+            for symbol, values in manifest.regime_thresholds.items()
+        },
+        lookback=manifest.regime_lookback,
+    )
+    regimes = assign_regimes(
+        feature_frames, dataset.times, dataset.symbols, thresholds
+    )
+    baseline_predictions = predict_baselines(
+        baselines,
+        dataset.x,
+        list(manifest.feature_names),
+        np.asarray(manifest.scaler_mean, dtype=np.float64),
+        np.asarray(manifest.scaler_scale, dtype=np.float64),
+        manifest.threshold,
+    )
+    probabilities = predict_frozen_probabilities(
+        manifest,
+        cnn_state,
+        list(manifest.feature_names),
+        dataset.x,
+        device="cpu",
+    )
+    cnn_predictions = probabilities.argmax(axis=1).astype(np.int64)
+    predictions = {**baseline_predictions, "cnn_lstm": cnn_predictions}
+    slices = evaluate_slices(dataset.y, predictions, regimes, dataset.symbols)
+
+    result = {
+        "configuration": {
+            "prospective_revealed": True,
+            "data_mode": data_mode,
+            "schema_version": manifest.schema_version,
+            "symbols": list(SYMBOLS),
+            "window_hours": manifest.window,
+            "feature_count": len(manifest.feature_names),
+            "selected_seed": manifest.selected_seed,
+            "selection_rule": "minimum_historical_validation_loss",
+            "selected_validation_loss": manifest.validation_loss,
+            "inference_device": "cpu",
+        },
+        "data": {
+            "source_start": PROSPECTIVE_CONTEXT_START,
+            "source_end_exclusive": PROSPECTIVE_CONTEXT_END,
+            "raw_rows": {symbol: int(len(frame)) for symbol, frame in raw_frames.items()},
+            "target_start": PROSPECTIVE_START,
+            "target_end": PROSPECTIVE_END,
+            "sample_count": int(len(dataset.y)),
+            "class_counts": _class_counts(dataset.y),
+            "regime_counts": {
+                regime: int(np.sum(regimes == regime))
+                for regime in ("low", "medium", "high")
+            },
+            "symbol_counts": {
+                symbol: int(np.sum(dataset.symbols == symbol)) for symbol in SYMBOLS
+            },
+            "first_scored_timestamp": pd.Timestamp(dataset.times.min(), tz="UTC").isoformat().replace("+00:00", "Z"),
+            "last_scored_timestamp": pd.Timestamp(dataset.times.max(), tz="UTC").isoformat().replace("+00:00", "Z"),
+        },
+        "selected_model": "cnn_lstm",
+        "slices": slices,
+    }
+    (output_dir / "prospective_results.json").write_text(json.dumps(result, indent=2))
+    examples = representative_predictions_by_regime(
+        dataset.y,
+        cnn_predictions,
+        probabilities,
+        dataset.times,
+        dataset.symbols,
+        regimes,
+    )
+    examples.to_csv(output_dir / "qualitative_examples.csv", index=False)
+
+    figures = output_dir / "figures"
+    save_regime_performance_figure(slices, figures / "regime_performance.png")
+    save_confusion_matrix(
+        dataset.y,
+        cnn_predictions,
+        figures / "prospective_confusion.png",
+        "Frozen CNN-LSTM: July 2026",
+    )
+    save_model_regime_diagram(figures / "model_regime_diagram.png")
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="stage", required=True)
@@ -457,12 +652,21 @@ def main() -> None:
     historical.add_argument("--output-dir", type=Path, default=Path("artifacts/final"))
     historical.add_argument("--dry-run", action="store_true")
     historical.add_argument("--epochs", type=int, default=12)
+    prospective = subparsers.add_parser("prospective")
+    prospective.add_argument("--output-dir", type=Path, default=Path("artifacts/final"))
+    prospective.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args()
-    result = run_historical_stage(
-        output_dir=arguments.output_dir,
-        dry_run=arguments.dry_run,
-        epochs=arguments.epochs,
-    )
+    if arguments.stage == "historical":
+        result = run_historical_stage(
+            output_dir=arguments.output_dir,
+            dry_run=arguments.dry_run,
+            epochs=arguments.epochs,
+        )
+    else:
+        result = run_prospective_stage(
+            output_dir=arguments.output_dir,
+            dry_run=arguments.dry_run,
+        )
     print(json.dumps(result, indent=2))
 
 
