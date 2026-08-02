@@ -1,0 +1,86 @@
+{
+  "feature_names": [
+    "return_1h",
+    "log_return_1h",
+    "high_low_range",
+    "close_open_return",
+    "volume_change",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "bb_position",
+    "bb_width",
+    "volatility_24h",
+    "volume_z_24h"
+  ],
+  "window": 96,
+  "threshold": 0.0023573862938918166,
+  "scaler_mean": [
+    7.054609638297395e-05,
+    5.265911718509575e-05,
+    0.007853363838966785,
+    7.049295570651061e-05,
+    0.1835313305965926,
+    50.8402979191714,
+    16.237742892469573,
+    16.264005938648637,
+    -0.026263046179064473,
+    0.024819355485881156,
+    0.033518367552951914,
+    0.005071381602262994,
+    0.005949566021986006
+  ],
+  "scaler_scale": [
+    0.005976930781777358,
+    0.005983209552200214,
+    0.006774640349354865,
+    0.0059768728179743595,
+    0.935017800448074,
+    11.78893818036999,
+    276.38901395354316,
+    258.8348653145033,
+    86.67249734553509,
+    0.6678394301152601,
+    0.02764612915714459,
+    0.0029192110733482104,
+    1.082455886889003
+  ],
+  "regime_thresholds": {
+    "BTCUSDT": [
+      0.0038981047137914226,
+      0.005117899997254657
+    ],
+    "ETHUSDT": [
+      0.005201657786456421,
+      0.006738936427815913
+    ]
+  },
+  "regime_lookback": 168,
+  "selected_seed": 43,
+  "validation_loss": 1.024986552050839,
+  "development_start": "2023-07-01T00:00:00Z",
+  "development_end": "2026-07-01T00:00:00Z",
+  "prospective_start": "2026-07-01T00:00:00Z",
+  "prospective_end": "2026-08-01T00:00:00Z",
+  "data_mode": "genuine",
+  "model_n_features": 13,
+  "model_conv_channels": 32,
+  "model_hidden_size": 48,
+  "model_num_classes": 3,
+  "schema_version": "frozen-package-v1",
+  "training_epochs": 12,
+  "training_batch_size": 256,
+  "training_learning_rate": 0.001,
+  "training_patience": 3,
+  "training_seed": 43,
+  "training_device": "mps",
+  "training_version": "cnn-lstm-v1",
+  "library_versions": {
+    "python": "3.12.13",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.9.0",
+    "pytorch": "2.13.0"
+  }
+}
