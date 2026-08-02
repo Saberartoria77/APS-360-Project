@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 import json
 from pathlib import Path
+import platform
 from typing import Any
 
 import numpy as np
+import pandas as pd
+import sklearn
 from sklearn.linear_model import LogisticRegression
 import torch
 
 from src.baselines import BaselineModels
 from src.data import FEATURE_COLUMNS
 from src.models import CNNLSTM
-from src.training import predict_probabilities
+from src.training import TrainConfig, predict_probabilities
 
 
 _MODEL_DEFAULTS = {
@@ -22,14 +25,6 @@ _MODEL_DEFAULTS = {
     "model_conv_channels": 32,
     "model_hidden_size": 48,
     "model_num_classes": 3,
-}
-_TRAINING_DEFAULTS = {
-    "training_epochs": 12,
-    "training_batch_size": 256,
-    "training_learning_rate": 0.001,
-    "training_patience": 3,
-    "training_device": None,
-    "training_version": "cnn-lstm-v1",
 }
 _EXACT_DATES = {
     "development_start": "2023-07-01T00:00:00Z",
@@ -45,6 +40,24 @@ _BASELINE_FIELDS = {
     "logistic_intercept",
     "logistic_n_features_in",
 }
+_REQUIRED_LIBRARY_VERSION_KEYS = {
+    "python",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "pytorch",
+}
+
+
+def current_library_versions() -> dict[str, str]:
+    """Capture runtime provenance for later reproducibility diagnosis."""
+    return {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "pandas": pd.__version__,
+        "scikit-learn": sklearn.__version__,
+        "pytorch": torch.__version__,
+    }
 
 
 @dataclass(frozen=True)
@@ -68,12 +81,15 @@ class FrozenManifest:
     model_conv_channels: int = 32
     model_hidden_size: int = 48
     model_num_classes: int = 3
+    schema_version: str = "frozen-package-v1"
     training_epochs: int = 12
     training_batch_size: int = 256
     training_learning_rate: float = 0.001
     training_patience: int = 3
+    training_seed: int = 42
     training_device: str | None = None
     training_version: str = "cnn-lstm-v1"
+    library_versions: dict[str, str] = field(default_factory=current_library_versions)
 
     def __post_init__(self) -> None:
         """Defensively copy mutable inputs supplied by a caller."""
@@ -88,9 +104,50 @@ class FrozenManifest:
                 for symbol, thresholds in self.regime_thresholds.items()
             },
         )
+        object.__setattr__(self, "library_versions", dict(self.library_versions))
 
 
 _MANIFEST_FIELDS = {field.name for field in fields(FrozenManifest)}
+
+
+def create_frozen_manifest(
+    *,
+    feature_names: list[str] | tuple[str, ...],
+    window: int,
+    threshold: float,
+    scaler_mean: list[float] | tuple[float, ...],
+    scaler_scale: list[float] | tuple[float, ...],
+    regime_thresholds: dict[str, list[float] | tuple[float, ...]],
+    config: TrainConfig,
+    device: str | None,
+    validation_loss: float,
+    development_start: str = "2023-07-01T00:00:00Z",
+    development_end: str = "2026-07-01T00:00:00Z",
+    prospective_start: str = "2026-07-01T00:00:00Z",
+    prospective_end: str = "2026-08-01T00:00:00Z",
+) -> FrozenManifest:
+    """Create a frozen manifest directly from the actual model training run."""
+    return FrozenManifest(
+        feature_names=tuple(feature_names),
+        window=window,
+        threshold=threshold,
+        scaler_mean=tuple(scaler_mean),
+        scaler_scale=tuple(scaler_scale),
+        regime_thresholds={symbol: tuple(values) for symbol, values in regime_thresholds.items()},
+        regime_lookback=168,
+        selected_seed=config.seed,
+        validation_loss=validation_loss,
+        development_start=development_start,
+        development_end=development_end,
+        prospective_start=prospective_start,
+        prospective_end=prospective_end,
+        training_epochs=config.epochs,
+        training_batch_size=config.batch_size,
+        training_learning_rate=config.learning_rate,
+        training_patience=config.patience,
+        training_seed=config.seed,
+        training_device=device,
+    )
 
 
 def _is_finite_number(value: object) -> bool:
@@ -99,6 +156,14 @@ def _is_finite_number(value: object) -> bool:
         and not isinstance(value, (bool, np.bool_))
         and bool(np.isfinite(value))
     )
+
+
+def _is_positive_integer(value: object) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)) and value > 0
+
+
+def _is_nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _validate_manifest(manifest: FrozenManifest) -> None:
@@ -132,15 +197,40 @@ def _validate_manifest(manifest: FrozenManifest) -> None:
         ):
             raise ValueError("incompatible frozen manifest")
 
-    if manifest.selected_seed not in {42, 43, 44} or not _is_finite_number(
-        manifest.validation_loss
+    if (
+        manifest.selected_seed not in {42, 43, 44}
+        or not _is_finite_number(manifest.validation_loss)
+        or manifest.validation_loss < 0.0
     ):
         raise ValueError("incompatible frozen manifest")
     if any(getattr(manifest, name) != value for name, value in _EXACT_DATES.items()):
         raise ValueError("incompatible frozen manifest")
     if any(getattr(manifest, name) != value for name, value in _MODEL_DEFAULTS.items()):
         raise ValueError("incompatible frozen manifest")
-    if any(getattr(manifest, name) != value for name, value in _TRAINING_DEFAULTS.items()):
+    if (
+        not all(
+            _is_positive_integer(getattr(manifest, name))
+            for name in ("training_epochs", "training_batch_size", "training_patience")
+        )
+        or not _is_finite_number(manifest.training_learning_rate)
+        or manifest.training_learning_rate <= 0.0
+        or manifest.training_seed != manifest.selected_seed
+        or (
+            manifest.training_device is not None
+            and not _is_nonempty_string(manifest.training_device)
+        )
+        or not _is_nonempty_string(manifest.training_version)
+        or not _is_nonempty_string(manifest.schema_version)
+    ):
+        raise ValueError("incompatible frozen manifest")
+    if (
+        not isinstance(manifest.library_versions, dict)
+        or not _REQUIRED_LIBRARY_VERSION_KEYS.issubset(manifest.library_versions)
+        or not all(
+            _is_nonempty_string(name) and _is_nonempty_string(version)
+            for name, version in manifest.library_versions.items()
+        )
+    ):
         raise ValueError("incompatible frozen manifest")
 
 

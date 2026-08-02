@@ -10,14 +10,17 @@ from src.data import FEATURE_COLUMNS
 from src.models import CNNLSTM
 from src.persistence import (
     FrozenManifest,
+    create_frozen_manifest,
+    current_library_versions,
     load_frozen_package,
     predict_frozen_probabilities,
     save_frozen_package,
 )
+from src.training import TrainConfig
 
 
 def _manifest() -> FrozenManifest:
-    return FrozenManifest(
+    return create_frozen_manifest(
         feature_names=list(FEATURE_COLUMNS),
         window=96,
         threshold=0.002,
@@ -27,13 +30,9 @@ def _manifest() -> FrozenManifest:
             "BTCUSDT": [0.001, 0.003],
             "ETHUSDT": [0.0015, 0.0035],
         },
-        regime_lookback=168,
-        selected_seed=42,
+        config=TrainConfig(seed=42),
+        device="cpu",
         validation_loss=1.0,
-        development_start="2023-07-01T00:00:00Z",
-        development_end="2026-07-01T00:00:00Z",
-        prospective_start="2026-07-01T00:00:00Z",
-        prospective_end="2026-08-01T00:00:00Z",
     )
 
 
@@ -61,6 +60,8 @@ def test_frozen_package_round_trip_preserves_safe_predictions_and_baselines(tmp_
     loaded_manifest, loaded_state, loaded_baselines = load_frozen_package(tmp_path)
 
     assert loaded_manifest == manifest
+    assert loaded_manifest.library_versions == manifest.library_versions
+    assert set(current_library_versions()).issubset(loaded_manifest.library_versions)
     assert loaded_baselines.majority_class == baselines.majority_class
     assert (tmp_path / "baselines.npz").is_file()
     assert not (tmp_path / "baselines.pkl").exists()
@@ -82,6 +83,36 @@ def test_frozen_package_round_trip_preserves_safe_predictions_and_baselines(tmp_
         loaded_baselines.logistic_regression.predict(features[:, -1, :]),
         baselines.logistic_regression.predict(features[:, -1, :]),
     )
+
+
+def test_manifest_factory_records_actual_non_default_training_run(tmp_path) -> None:
+    config = TrainConfig(
+        epochs=7, batch_size=128, learning_rate=0.005, patience=2, seed=43, device="cuda"
+    )
+    manifest = create_frozen_manifest(
+        feature_names=list(FEATURE_COLUMNS),
+        window=96,
+        threshold=0.002,
+        scaler_mean=[0.0] * len(FEATURE_COLUMNS),
+        scaler_scale=[1.0] * len(FEATURE_COLUMNS),
+        regime_thresholds={
+            "BTCUSDT": [0.001, 0.003],
+            "ETHUSDT": [0.0015, 0.0035],
+        },
+        config=config,
+        device="mps",
+        validation_loss=0.4,
+    )
+    _, state, baselines = _artifacts()
+    save_frozen_package(tmp_path, manifest, state, baselines)
+    loaded_manifest, _, _ = load_frozen_package(tmp_path)
+
+    assert loaded_manifest.selected_seed == loaded_manifest.training_seed == 43
+    assert loaded_manifest.training_epochs == 7
+    assert loaded_manifest.training_batch_size == 128
+    assert loaded_manifest.training_learning_rate == 0.005
+    assert loaded_manifest.training_patience == 2
+    assert loaded_manifest.training_device == "mps"
 
 
 def test_safe_inference_rejects_reordered_feature_names(tmp_path) -> None:
@@ -127,7 +158,9 @@ def test_load_rejects_state_shape_mismatch(tmp_path) -> None:
         {"regime_thresholds": {"BTCUSDT": [0.003, 0.001], "ETHUSDT": [0.001, 0.003]}},
         {"development_end": "2026-06-30T23:00:00Z"},
         {"model_hidden_size": 47},
-        {"training_batch_size": 128},
+        {"training_seed": 43},
+        {"validation_loss": -0.1},
+        {"library_versions": {"python": ""}},
     ],
 )
 def test_load_rejects_invalid_schema_metadata(tmp_path, updates: dict) -> None:
@@ -145,7 +178,7 @@ def test_load_rejects_manifest_missing_required_key(tmp_path) -> None:
     _save_valid_package(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     raw = json.loads(manifest_path.read_text())
-    raw.pop("training_version")
+    raw.pop("library_versions")
     manifest_path.write_text(json.dumps(raw))
 
     with pytest.raises(ValueError, match="incompatible frozen manifest"):
