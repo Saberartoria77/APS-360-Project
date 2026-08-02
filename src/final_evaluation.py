@@ -179,7 +179,7 @@ def save_model_regime_diagram(destination: Path) -> Path:
             "#E8F1FA",
         ),
         (0.255, 0.73, "Frozen scaling\n96 x 13 window", "#D5E8D4"),
-        (0.445, 0.73, "Conv1D + LSTM\n3-class softmax", "#FFF2CC"),
+        (0.445, 0.73, "Conv1D + LSTM\n3-class logits", "#FFF2CC"),
         (0.625, 0.73, "Down / Flat / Up\nnext-hour forecast", "#F8CECC"),
         (
             0.325,

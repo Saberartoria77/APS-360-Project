@@ -107,6 +107,62 @@ def test_final_report_uses_genuine_saved_results() -> None:
     ]
     assert f"{metric:.3f}" in text
 
+    historical_cnn = historical["global_evaluation"]["slices"]["overall"][
+        "models"
+    ]["cnn_lstm"]
+    assert f'{historical_cnn["macro_f1"]["mean"]:.3f}' in text
+    assert f'{historical_cnn["macro_f1"]["std"]:.3f}' in text
+    prospective_cnn = prospective["slices"]["overall"]["models"]["cnn_lstm"]
+    assert f'{prospective_cnn["accuracy"]:.3f}' in text
+
+    assert sum(prospective["data"]["class_counts"]) == prospective["data"][
+        "sample_count"
+    ]
+    assert sum(prospective["data"]["regime_counts"].values()) == prospective[
+        "data"
+    ]["sample_count"]
+    assert f'{prospective["data"]["sample_count"]:,}' in text
+    for count in prospective["data"]["class_counts"]:
+        assert f"{count:,}" in text
+    for count in prospective["data"]["regime_counts"].values():
+        assert f"{count:,}" in text
+
+    transfers = historical["cross_regime_evaluation"][
+        "paired_cnn_transfer_macro_f1_changes"
+    ]
+    for transfer in transfers:
+        assert f'{abs(transfer["macro_f1_change_mean"]):.3f}' in text
+        assert f'{transfer["macro_f1_change_std"]:.3f}' in text
+
+
+def test_final_report_data_example_and_architecture_match_code() -> None:
+    text = Path("final_report.tex").read_text()
+    normalized = " ".join(text.split())
+    assert "2026-06-30 22:00 UTC" in text
+    assert "58,639.99" in text
+    assert "58,607.99" in text
+    assert "38.365" in text
+    assert "linear logit head" in text
+    assert "Softmax is applied only at inference" in normalized
+    assert "inverse-frequency" in text
+    assert r"\textbf{0.481}" in text
+
+    figure_source = Path("src/final_evaluation.py").read_text()
+    assert "3-class logits" in figure_source
+    assert "3-class softmax" not in figure_source
+
+
+def test_readme_documents_final_evaluation_artifacts() -> None:
+    text = Path("README.md").read_text()
+    for required in [
+        "run_final_experiment.py",
+        "artifacts/final/",
+        "tectonic final_report.tex",
+        "final_report.pdf",
+    ]:
+        assert required in text
+    assert "deferred to the final project" not in text.lower()
+
 
 def test_final_report_has_four_main_pages_plus_references() -> None:
     reader = PdfReader("final_report.pdf")

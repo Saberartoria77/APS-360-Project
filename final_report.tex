@@ -82,6 +82,12 @@ test windows. Training class counts were 8,838/18,230/9,516 (down/flat/up); hist
 were 2,061/3,703/1,938. Feature means/scales, label threshold, and model selection were fitted using
 training or validation data only; no window crosses a symbol or split boundary.
 
+\tighthead{Genuine example.} At BTCUSDT 2026-06-30 22:00 UTC, raw
+open/high/low/close/volume were 58,639.99/58,806.91/58,513.80/58,607.99/274.43078.
+The engineered one-hour return was $-0.000546$, RSI(14) was 38.365, and 24-hour volatility was
+0.003793. The next close was 58,624.71, a return of $+0.000285$; because its magnitude was below
+the frozen threshold, the resulting class was flat.
+
 \tighthead{Volatility regimes.} For each asset, trailing realized volatility at $t$ is the population
 standard deviation of 168 hourly log returns available through $t$. The low/high cut points are the
 training-only 33rd/67th percentiles: BTC $0.00390/0.00512$ and ETH $0.00520/0.00674$.
@@ -91,10 +97,11 @@ are medium. Per-asset thresholds avoid using asset identity as a volatility prox
 \section{Architecture}
 The 18,067-parameter PyTorch model applies same-padded Conv1D ($13\rightarrow32$, kernel 5), ReLU,
 batch normalization, and 0.15 dropout to all 96 steps. A one-layer LSTM with 48 hidden units feeds
-the last hidden state through 0.20 dropout and a $48\rightarrow3$ softmax head. Weighted
-cross-entropy, Adam ($10^{-3}$), batch size 256, gradient clipping at 1.0, at most 12 epochs, and
-validation-loss patience 3 were used. Seeds 42--44 quantify variation; minimum validation loss
-selected seed 43 before prospective access.
+the last hidden state through 0.20 dropout and a $48\rightarrow3$ linear logit head. CrossEntropyLoss
+uses inverse-frequency training weights $w_c=N/(3n_c)$ and consumes logits directly; Softmax is
+applied only at inference. Adam ($10^{-3}$), batch size 256, gradient clipping at 1.0, at most 12
+epochs, and validation-loss patience 3 were used. Seeds 42--44 quantify variation; minimum validation
+loss selected seed 43 before prospective access.
 
 \section{Baseline Models}
 All baselines use identical windows and labels. \emph{Majority} predicts the most frequent training
@@ -119,9 +126,9 @@ prospective seed are single evaluations. Macro-F1 is primary because flat is the
 & \multicolumn{2}{c}{Historical test} & \multicolumn{2}{c}{Prospective July}\\
 Model & Macro-F1 & Accuracy & Macro-F1 & Accuracy\\
 \midrule
-Majority & 0.216 & 0.481 & 0.243 & \textbf{0.573}\\
+Majority & 0.216 & \textbf{0.481} & 0.243 & \textbf{0.573}\\
 Momentum & 0.380 & 0.421 & 0.356 & 0.447\\
-Logistic regression & \textbf{0.429} & \textbf{0.480} & 0.380 & 0.529\\
+Logistic regression & \textbf{0.429} & 0.480 & 0.380 & 0.529\\
 CNN--LSTM & $0.429\pm0.004$ & $0.450\pm0.005$ & \textbf{0.409} & 0.489\\
 \bottomrule
 \end{tabular}

@@ -13,9 +13,19 @@ The prospective command requires the frozen package created by the historical co
 
 The genuine frozen CNN-LSTM reached 0.409 macro-F1 and 0.489 accuracy on 1,488 July targets. Its historical three-seed macro-F1 was $0.429\pm0.004$; explicit low/high regime transfer produced negative paired changes in both directions. See `final_report.pdf` for definitions, baselines, uncertainty, limitations, and the full interpretation.
 
-## Progress checkpoint
+The report-ready evidence is stored under `artifacts/final/`: the frozen manifest, historical and prospective JSON, cross-regime CSV, qualitative examples, and final figures.
 
-The reproducible pipeline currently:
+To compile the four-page course report plus references:
+
+```bash
+tectonic final_report.tex
+```
+
+The submission artifact is `final_report.pdf`.
+
+## Earlier progress checkpoint
+
+The earlier progress-report pipeline:
 
 - downloads hourly BTCUSDT and ETHUSDT OHLCV data from the public Binance API;
 - builds 13 causal return, volume, RSI, MACD, Bollinger, and volatility features;
@@ -25,7 +35,7 @@ The reproducible pipeline currently:
 - trains an 18,067-parameter PyTorch CNN-LSTM with validation-based early stopping;
 - saves metrics, confusion matrices, learning curves, and qualitative prediction examples.
 
-The genuine July 2023–June 2026 run contains 52,608 raw hourly rows. On 7,702 held-out windows, logistic regression reached 48.0% accuracy and the CNN-LSTM reached 44.4% accuracy (42.5% macro-F1). The neural model did not yet beat the strongest baseline, but improved recall for directional classes and demonstrated that the complete neural pipeline is feasible. Full regime-shift testing is intentionally deferred to the final project.
+That historical checkpoint used the same July 2023–June 2026 source range. On 7,702 held-out windows, logistic regression reached 48.0% accuracy and the single-seed checkpoint CNN-LSTM reached 44.4% accuracy (42.5% macro-F1). These are preserved progress-report results, not the final three-seed or prospective metrics above.
 
 ## Run in Google Colab
 
@@ -46,18 +56,19 @@ python run_experiment.py --start 2023-07-01 --end 2026-07-01 --epochs 12
 
 The collector caches downloaded CSV files under `data/raw/`, which is intentionally excluded from Git. Subsequent runs reuse that cache.
 
-To compile the course-format report with [Tectonic](https://tectonic-typesetting.github.io/):
+To compile the archived progress report with [Tectonic](https://tectonic-typesetting.github.io/):
 
 ```bash
 tectonic progress_report.tex
 ```
 
-The compiled submission draft is `progress_report.pdf`. Its main text is three pages; references occupy page 4.
+The archived progress artifact is `progress_report.pdf`; the current submission artifact is `final_report.pdf`.
 
 ## Repository map
 
 - `notebooks/progress_report.ipynb` — Colab-ready end-to-end workflow.
 - `run_experiment.py` — experiment orchestration and artifact generation.
+- `run_final_experiment.py` — guarded historical freeze and one-time prospective evaluation.
 - `src/data.py` — Binance collection, causal features, labels, splits, and windows.
 - `src/baselines.py` — momentum and logistic-regression baselines.
 - `src/models.py` — CNN-LSTM architecture.
@@ -66,6 +77,8 @@ The compiled submission draft is `progress_report.pdf`. Its main text is three p
 - `artifacts/metrics/` — genuine run configuration, metrics, and selected predictions.
 - `artifacts/figures/` — report-ready generated figures.
 - `progress_report.tex`, `progress_report.pdf` — APS360 progress-report source and compiled draft.
+- `artifacts/final/` — genuine frozen manifest, final metrics, examples, and figures.
+- `final_report.tex`, `final_report.pdf` — final-report source and submission PDF.
 - `tests/` — leakage, alignment, model-shape, artifact, notebook, and report-integrity checks.
 
 ## Verification
