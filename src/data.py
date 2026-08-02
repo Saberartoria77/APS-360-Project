@@ -108,7 +108,7 @@ def prepare_evaluation_windows(
         or scaler_mean.shape != scaler_scale.shape
         or not np.all(np.isfinite(scaler_mean))
         or not np.all(np.isfinite(scaler_scale))
-        or np.any(scaler_scale == 0.0)
+        or np.any(scaler_scale <= 0.0)
     ):
         raise ValueError("frozen feature and scaler metadata are incompatible")
 
@@ -129,6 +129,8 @@ def prepare_evaluation_windows(
         subset.index = subset.index.tz_convert("UTC")
         subset["label"] = make_direction_labels(subset["close"], horizon=1, threshold=threshold)
         subset = subset.dropna(subset=[*feature_names, "label"])
+        if not np.all(np.diff(subset.index.asi8) == pd.Timedelta(hours=1).value):
+            raise ValueError(f"{symbol} retained rows must be hourly contiguous")
         values = (subset[feature_names].to_numpy(dtype=np.float64) - scaler_mean) / scaler_scale
         labels = subset["label"].to_numpy(dtype=np.int64)
         times = subset.index.to_numpy(dtype="datetime64[ns]")

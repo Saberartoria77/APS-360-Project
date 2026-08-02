@@ -56,11 +56,29 @@ def test_evaluation_windows_reject_gapped_hourly_index() -> None:
         )
 
 
+def test_evaluation_windows_reject_interior_missing_feature_row() -> None:
+    frame = _clean_frame()
+    frame.loc[pd.Timestamp("2026-06-25 12:00", tz="UTC"), FEATURE_COLUMNS[0]] = np.nan
+
+    with pytest.raises(ValueError, match="hourly contiguous"):
+        prepare_evaluation_windows(
+            {"BTCUSDT": frame},
+            feature_names=list(FEATURE_COLUMNS),
+            scaler_mean=np.zeros(len(FEATURE_COLUMNS)),
+            scaler_scale=np.ones(len(FEATURE_COLUMNS)),
+            threshold=0.005,
+            window=96,
+            target_start=pd.Timestamp("2026-07-01", tz="UTC"),
+            target_end=pd.Timestamp("2026-08-01", tz="UTC"),
+        )
+
+
 @pytest.mark.parametrize(
     ("scaler_mean", "scaler_scale"),
     [
         (np.full(len(FEATURE_COLUMNS), np.nan), np.ones(len(FEATURE_COLUMNS))),
         (np.zeros(len(FEATURE_COLUMNS)), np.array([0.0, *np.ones(len(FEATURE_COLUMNS) - 1)])),
+        (np.zeros(len(FEATURE_COLUMNS)), np.array([-1.0, *np.ones(len(FEATURE_COLUMNS) - 1)])),
     ],
 )
 def test_evaluation_windows_reject_invalid_frozen_scaler_metadata(
