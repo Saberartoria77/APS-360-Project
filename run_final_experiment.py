@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
+import shutil
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -38,6 +41,8 @@ from src.persistence import (
     load_frozen_package,
     predict_frozen_probabilities,
     save_frozen_package,
+    sha256_file,
+    state_dict_sha256,
 )
 from src.regimes import (
     RegimeThresholds,
@@ -46,7 +51,7 @@ from src.regimes import (
     realized_volatility,
     subset_bundle,
 )
-from src.training import TrainConfig, TrainResult, train_model
+from src.training import TrainConfig, TrainResult, predict_probabilities, train_model
 
 
 HISTORICAL_START = "2023-07-01"
@@ -60,6 +65,130 @@ SYNTHETIC_HISTORICAL_START = "2024-01-01T00:00:00Z"
 SYNTHETIC_HISTORICAL_END = "2024-02-11T16:00:00Z"
 SYNTHETIC_HISTORICAL_ROWS = 1000
 SYNTHETIC_PROSPECTIVE_ROWS = 1100
+PROSPECTIVE_REVEAL_MARKER = ".prospective-reveal.json"
+PROSPECTIVE_ARTIFACT_INDEX = "prospective_artifact_index.json"
+PROSPECTIVE_ARTIFACTS = (
+    "prospective_results.json",
+    "qualitative_examples.csv",
+    "figures/regime_performance.png",
+    "figures/prospective_confusion.png",
+    "figures/model_regime_diagram.png",
+)
+CANONICAL_GENUINE_OUTPUT = (Path(__file__).resolve().parent / "artifacts/final").resolve()
+
+
+def _json_data_mode(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        decoded = json.loads(path.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "unknown"
+    if not isinstance(decoded, dict):
+        return "unknown"
+    if path.name in {"manifest.json", PROSPECTIVE_ARTIFACT_INDEX, PROSPECTIVE_REVEAL_MARKER}:
+        return decoded.get("data_mode", "unknown")
+    configuration = decoded.get("configuration")
+    if isinstance(configuration, dict):
+        return configuration.get("data_mode", "unknown")
+    return "unknown"
+
+
+def _output_data_modes(output_dir: Path) -> set[str]:
+    candidates = (
+        output_dir / "frozen/manifest.json",
+        output_dir / "historical_results.json",
+        output_dir / "prospective_results.json",
+        output_dir / PROSPECTIVE_ARTIFACT_INDEX,
+        output_dir / PROSPECTIVE_REVEAL_MARKER,
+    )
+    return {mode for path in candidates if (mode := _json_data_mode(path)) is not None}
+
+
+def _contains_prospective_state(output_dir: Path) -> bool:
+    paths = [output_dir / PROSPECTIVE_REVEAL_MARKER, output_dir / PROSPECTIVE_ARTIFACT_INDEX]
+    paths.extend(output_dir / relative for relative in PROSPECTIVE_ARTIFACTS)
+    return any(path.exists() for path in paths)
+
+
+def _guard_output_mode(output_dir: Path, *, data_mode: str, stage: str) -> None:
+    """Refuse mixed-mode and repeated runs before data access or training."""
+    output_dir = Path(output_dir)
+    if data_mode == "synthetic" and output_dir.resolve() == CANONICAL_GENUINE_OUTPUT:
+        raise ValueError("dry runs cannot use the canonical genuine output directory")
+    modes = _output_data_modes(output_dir)
+    if modes and modes != {data_mode}:
+        raise ValueError("output data mode cannot mix synthetic and genuine state")
+    marker = output_dir / PROSPECTIVE_REVEAL_MARKER
+    if stage == "historical" and _contains_prospective_state(output_dir):
+        if data_mode == "genuine" and marker.exists():
+            raise ValueError("genuine historical execution is forbidden after prospective reveal")
+        raise ValueError("historical execution is forbidden after prospective artifacts exist")
+    if stage == "prospective" and _contains_prospective_state(output_dir):
+        raise ValueError("output already contains prospective artifacts or a reveal marker")
+
+
+def _begin_prospective_reveal(output_dir: Path, *, data_mode: str) -> Path:
+    """Durably and exclusively mark genuine data access before it can begin."""
+    if data_mode != "genuine":
+        raise ValueError("only genuine prospective access uses a reveal marker")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    marker = output_dir / PROSPECTIVE_REVEAL_MARKER
+    payload = json.dumps(
+        {
+            "schema_version": "prospective-reveal-v1",
+            "data_mode": "genuine",
+            "status": "revealed",
+        },
+        indent=2,
+    ).encode()
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as error:
+        raise ValueError("genuine prospective data have already been revealed") from error
+    try:
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_descriptor = os.open(output_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return marker
+
+
+def _prospective_artifact_index(staging_dir: Path, *, data_mode: str) -> dict:
+    bindings = {}
+    for relative in PROSPECTIVE_ARTIFACTS:
+        path = staging_dir / relative
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError(f"prospective staging artifact is missing or empty: {relative}")
+        bindings[relative] = {
+            "sha256": sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+    result = json.loads((staging_dir / "prospective_results.json").read_text())
+    if result.get("configuration", {}).get("data_mode") != data_mode:
+        raise ValueError("staged prospective result has the wrong data mode")
+    examples = pd.read_csv(staging_dir / "qualitative_examples.csv")
+    if examples.empty:
+        raise ValueError("staged qualitative examples must not be empty")
+    return {
+        "schema_version": "prospective-artifact-index-v1",
+        "data_mode": data_mode,
+        "artifacts": bindings,
+    }
+
+
+def _publish_prospective_artifacts(staging_dir: Path, output_dir: Path) -> None:
+    for relative in (*PROSPECTIVE_ARTIFACTS, PROSPECTIVE_ARTIFACT_INDEX):
+        source = staging_dir / relative
+        destination = output_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, destination)
 
 
 def _validate_hourly_frame(
@@ -162,10 +291,11 @@ def _cross_regime_row(
     model: str,
     metrics: list[dict],
     labels: np.ndarray,
+    checkpoint_digests: dict[int, str] | None = None,
 ) -> dict:
     counts = _class_counts(labels)
     recalls = np.asarray([result["per_class_recall"] for result in metrics], dtype=float)
-    return {
+    row = {
         "train_regime": train_regime,
         "test_regime": test_regime,
         "model": model,
@@ -185,6 +315,15 @@ def _cross_regime_row(
         "recall_up_mean": float(recalls[:, 2].mean()),
         "recall_up_std": float(recalls[:, 2].std(ddof=0)),
     }
+    if model == "cnn_lstm":
+        if not checkpoint_digests or len(checkpoint_digests) != len(metrics):
+            raise ValueError("CNN transfer rows require one checkpoint digest per seed")
+        row["checkpoint_digests"] = ";".join(
+            f"{seed}:{checkpoint_digests[seed]}" for seed in sorted(checkpoint_digests)
+        )
+    else:
+        row["checkpoint_digests"] = ""
+    return row
 
 
 def _deterministic_transfer_changes(rows: list[dict]) -> list[dict]:
@@ -213,6 +352,96 @@ def _deterministic_transfer_changes(rows: list[dict]) -> list[dict]:
     return changes
 
 
+def _evaluate_cross_regime(
+    bundle: DatasetBundle,
+    regimes: dict[str, np.ndarray],
+    *,
+    seeds: tuple[int, ...],
+    epochs: int,
+    dry_run: bool,
+) -> tuple[list[dict], dict[tuple[str, str], dict[int, dict]]]:
+    """Train once per train-regime/seed and reuse that checkpoint across test regimes."""
+    cross_rows: list[dict] = []
+    cnn_seed_metrics: dict[tuple[str, str], dict[int, dict]] = {}
+    for train_regime, opposite_regime in (("low", "high"), ("high", "low")):
+        common_masks = {
+            "train": regimes["train"] == train_regime,
+            "val": regimes["val"] == train_regime,
+        }
+        training_subset = subset_bundle(
+            bundle,
+            {**common_masks, "test": regimes["test"] == train_regime},
+        )
+        pair_baselines = fit_baseline_models(
+            training_subset.x_train, training_subset.y_train
+        )
+        trained: dict[int, tuple[TrainConfig, TrainResult, str]] = {}
+        for seed in seeds:
+            config = _training_config(seed, epochs, dry_run)
+            training_result = train_model(training_subset, config)
+            trained[seed] = (
+                config,
+                training_result,
+                state_dict_sha256(training_result.best_state),
+            )
+
+        for test_regime in (train_regime, opposite_regime):
+            evaluation_subset = subset_bundle(
+                bundle,
+                {**common_masks, "test": regimes["test"] == test_regime},
+            )
+            baseline_predictions = predict_baselines(
+                pair_baselines,
+                evaluation_subset.x_test,
+                evaluation_subset.feature_names,
+                evaluation_subset.scaler_mean,
+                evaluation_subset.scaler_scale,
+                evaluation_subset.threshold,
+            )
+            logistic_metrics = classification_metrics(
+                evaluation_subset.y_test,
+                baseline_predictions["logistic_regression"],
+            )
+            cross_rows.append(
+                _cross_regime_row(
+                    train_regime,
+                    test_regime,
+                    "logistic_regression",
+                    [logistic_metrics],
+                    evaluation_subset.y_test,
+                )
+            )
+
+            pair_seed_metrics: dict[int, dict] = {}
+            checkpoint_digests: dict[int, str] = {}
+            for seed, (config, training_result, checkpoint_digest) in trained.items():
+                probabilities = predict_probabilities(
+                    training_result.best_state,
+                    evaluation_subset.x_test,
+                    batch_size=config.batch_size,
+                    device=training_result.device,
+                )
+                metrics = classification_metrics(
+                    evaluation_subset.y_test,
+                    probabilities.argmax(axis=1).astype(np.int64),
+                )
+                metrics["checkpoint_sha256"] = checkpoint_digest
+                pair_seed_metrics[seed] = metrics
+                checkpoint_digests[seed] = checkpoint_digest
+            cnn_seed_metrics[(train_regime, test_regime)] = pair_seed_metrics
+            cross_rows.append(
+                _cross_regime_row(
+                    train_regime,
+                    test_regime,
+                    "cnn_lstm",
+                    list(pair_seed_metrics.values()),
+                    evaluation_subset.y_test,
+                    checkpoint_digests=checkpoint_digests,
+                )
+            )
+    return cross_rows, cnn_seed_metrics
+
+
 def run_historical_stage(
     output_dir: Path | str = Path("artifacts/final"),
     dry_run: bool = False,
@@ -230,6 +459,7 @@ def run_historical_stage(
     data_mode = "synthetic" if dry_run else "genuine"
 
     output_dir = Path(output_dir)
+    _guard_output_mode(output_dir, data_mode=data_mode, stage="historical")
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_frames = {}
     for symbol in SYMBOLS:
@@ -308,53 +538,13 @@ def run_historical_stage(
     selected_config, selected_result = global_training[selected_index]
     selected_validation_loss = global_runs[selected_index]["validation_loss"]
 
-    cross_rows = []
-    cnn_seed_metrics: dict[tuple[str, str], dict[int, dict]] = {}
-    for train_regime, test_regime in transfer_pairs():
-        masks = {
-            "train": regimes["train"] == train_regime,
-            "val": regimes["val"] == train_regime,
-            "test": regimes["test"] == test_regime,
-        }
-        subset = subset_bundle(bundle, masks)
-        pair_baselines = fit_baseline_models(subset.x_train, subset.y_train)
-        pair_predictions = predict_baselines(
-            pair_baselines,
-            subset.x_test,
-            subset.feature_names,
-            subset.scaler_mean,
-            subset.scaler_scale,
-            subset.threshold,
-        )
-        logistic_metrics = classification_metrics(
-            subset.y_test, pair_predictions["logistic_regression"]
-        )
-        cross_rows.append(
-            _cross_regime_row(
-                train_regime,
-                test_regime,
-                "logistic_regression",
-                [logistic_metrics],
-                subset.y_test,
-            )
-        )
-
-        pair_seed_metrics = {}
-        for seed in seeds:
-            pair_result = train_model(subset, _training_config(seed, epochs, dry_run))
-            pair_seed_metrics[seed] = classification_metrics(
-                subset.y_test, pair_result.test_predictions
-            )
-        cnn_seed_metrics[(train_regime, test_regime)] = pair_seed_metrics
-        cross_rows.append(
-            _cross_regime_row(
-                train_regime,
-                test_regime,
-                "cnn_lstm",
-                list(pair_seed_metrics.values()),
-                subset.y_test,
-            )
-        )
+    cross_rows, cnn_seed_metrics = _evaluate_cross_regime(
+        bundle,
+        regimes,
+        seeds=seeds,
+        epochs=epochs,
+        dry_run=dry_run,
+    )
 
     slices = _merge_global_slices(baseline_slices, cnn_slices_by_seed)
     paired_cnn_changes = paired_transfer_changes(cnn_seed_metrics)
@@ -525,13 +715,14 @@ def run_prospective_stage(
     """Reveal and score July targets once using a complete frozen package."""
     output_dir = Path(output_dir)
     data_mode = "synthetic" if dry_run else "genuine"
+    _guard_output_mode(output_dir, data_mode=data_mode, stage="prospective")
 
     # This integrity gate intentionally precedes all market-data construction or access.
     manifest, cnn_state, baselines = load_frozen_package(
         output_dir / "frozen", expected_data_mode=data_mode
     )
     if (
-        manifest.schema_version != "frozen-package-v1"
+        manifest.schema_version != "frozen-package-v2"
         or manifest.data_mode != data_mode
         or manifest.feature_names != tuple(FEATURE_COLUMNS)
         or manifest.window != 96
@@ -539,6 +730,8 @@ def run_prospective_stage(
         or manifest.prospective_end != PROSPECTIVE_END
     ):
         raise ValueError("frozen manifest does not match the prospective experiment")
+    if not dry_run:
+        _begin_prospective_reveal(output_dir, data_mode=data_mode)
 
     raw_frames = _prospective_raw_frames(dry_run)
     feature_frames = {
@@ -600,6 +793,10 @@ def run_prospective_stage(
             "selection_rule": "minimum_historical_validation_loss",
             "selected_validation_loss": manifest.validation_loss,
             "inference_device": "cpu",
+            "frozen_state": {
+                "cnn_sha256": manifest.cnn_sha256,
+                "baselines_sha256": manifest.baselines_sha256,
+            },
         },
         "data": {
             "source_start": PROSPECTIVE_CONTEXT_START,
@@ -622,7 +819,6 @@ def run_prospective_stage(
         "selected_model": "cnn_lstm",
         "slices": slices,
     }
-    (output_dir / "prospective_results.json").write_text(json.dumps(result, indent=2))
     examples = representative_predictions_by_regime(
         dataset.y,
         cnn_predictions,
@@ -631,17 +827,25 @@ def run_prospective_stage(
         dataset.symbols,
         regimes,
     )
-    examples.to_csv(output_dir / "qualitative_examples.csv", index=False)
-
-    figures = output_dir / "figures"
-    save_regime_performance_figure(slices, figures / "regime_performance.png")
-    save_confusion_matrix(
-        dataset.y,
-        cnn_predictions,
-        figures / "prospective_confusion.png",
-        "Frozen CNN-LSTM: July 2026",
-    )
-    save_model_regime_diagram(figures / "model_regime_diagram.png")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=".prospective-staging-", dir=output_dir))
+    try:
+        (staging_dir / "prospective_results.json").write_text(json.dumps(result, indent=2))
+        examples.to_csv(staging_dir / "qualitative_examples.csv", index=False)
+        figures = staging_dir / "figures"
+        save_regime_performance_figure(slices, figures / "regime_performance.png")
+        save_confusion_matrix(
+            dataset.y,
+            cnn_predictions,
+            figures / "prospective_confusion.png",
+            "Frozen CNN-LSTM: July 2026",
+        )
+        save_model_regime_diagram(figures / "model_regime_diagram.png")
+        index = _prospective_artifact_index(staging_dir, data_mode=data_mode)
+        (staging_dir / PROSPECTIVE_ARTIFACT_INDEX).write_text(json.dumps(index, indent=2))
+        _publish_prospective_artifacts(staging_dir, output_dir)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
     return result
 
 

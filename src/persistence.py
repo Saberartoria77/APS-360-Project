@@ -425,6 +425,27 @@ def sha256_file(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+def state_dict_sha256(state: dict[str, torch.Tensor]) -> str:
+    """Hash tensor names, dtypes, shapes, and bytes in a canonical order."""
+    if not isinstance(state, dict) or not state:
+        raise ValueError("state must be a non-empty tensor dictionary")
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name]
+        if not isinstance(name, str) or not isinstance(tensor, torch.Tensor):
+            raise ValueError("state must be a non-empty tensor dictionary")
+        contiguous = tensor.detach().cpu().contiguous()
+        metadata = json.dumps(
+            {"name": name, "dtype": str(contiguous.dtype), "shape": list(contiguous.shape)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(metadata).to_bytes(8, "big"))
+        digest.update(metadata)
+        digest.update(contiguous.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
 def _load_validated_state_from_memory(
     state: dict[str, torch.Tensor], manifest: FrozenManifest
 ) -> None:

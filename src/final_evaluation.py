@@ -33,9 +33,21 @@ def paired_transfer_changes(
         opposite = seed_metrics[(train_regime, opposite_regime)]
         if not matching or set(matching) != set(opposite):
             raise ValueError("matching and opposite transfer results require identical seeds")
+        for seed in matching:
+            matching_digest = matching[seed].get("checkpoint_sha256")
+            opposite_digest = opposite[seed].get("checkpoint_sha256")
+            if (
+                not isinstance(matching_digest, str)
+                or len(matching_digest) != 64
+                or matching_digest != opposite_digest
+            ):
+                raise ValueError(
+                    "paired transfer results must use the same checkpoint digest"
+                )
         per_seed = [
             {
                 "seed": int(seed),
+                "checkpoint_sha256": matching[seed]["checkpoint_sha256"],
                 "macro_f1_change": float(
                     opposite[seed]["macro_f1"] - matching[seed]["macro_f1"]
                 ),
