@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
+import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 import platform
 from typing import Any
@@ -78,11 +81,13 @@ class FrozenManifest:
     prospective_start: str
     prospective_end: str
     data_mode: str
+    cnn_sha256: str | None = None
+    baselines_sha256: str | None = None
     model_n_features: int = 13
     model_conv_channels: int = 32
     model_hidden_size: int = 48
     model_num_classes: int = 3
-    schema_version: str = "frozen-package-v1"
+    schema_version: str = "frozen-package-v2"
     training_epochs: int = 12
     training_batch_size: int = 256
     training_learning_rate: float = 0.001
@@ -169,7 +174,17 @@ def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _validate_manifest(manifest: FrozenManifest) -> None:
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_manifest(
+    manifest: FrozenManifest, *, require_digests: bool = True
+) -> None:
     """Reject any metadata that deviates from the frozen experiment contract."""
     if not isinstance(manifest, FrozenManifest):
         raise ValueError("incompatible frozen manifest")
@@ -209,6 +224,12 @@ def _validate_manifest(manifest: FrozenManifest) -> None:
     if any(getattr(manifest, name) != value for name, value in _EXACT_DATES.items()):
         raise ValueError("incompatible frozen manifest")
     if manifest.data_mode not in {"genuine", "synthetic"}:
+        raise ValueError("incompatible frozen manifest")
+    digests = (manifest.cnn_sha256, manifest.baselines_sha256)
+    if require_digests:
+        if not all(_is_sha256(value) for value in digests):
+            raise ValueError("incompatible frozen manifest")
+    elif any(value is not None and not _is_sha256(value) for value in digests):
         raise ValueError("incompatible frozen manifest")
     if any(getattr(manifest, name) != value for name, value in _MODEL_DEFAULTS.items()):
         raise ValueError("incompatible frozen manifest")
@@ -357,16 +378,51 @@ def save_frozen_package(
     manifest: FrozenManifest,
     cnn_state: dict[str, torch.Tensor],
     baselines: BaselineModels,
-) -> None:
+) -> FrozenManifest:
     """Write the complete frozen package with no executable serialized objects."""
-    _validate_manifest(manifest)
+    _validate_manifest(manifest, require_digests=False)
     _load_validated_state_from_memory(cnn_state, manifest)
     baseline_arrays = _baseline_arrays(baselines, manifest)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    (destination / "manifest.json").write_text(json.dumps(asdict(manifest), indent=2))
-    torch.save(cnn_state, destination / "cnn_lstm.pt")
-    np.savez(destination / "baselines.npz", **baseline_arrays)
+    state_path = destination / "cnn_lstm.pt"
+    baseline_path = destination / "baselines.npz"
+    manifest_path = destination / "manifest.json"
+    state_staging = destination / ".cnn_lstm.pt.tmp"
+    baseline_staging = destination / ".baselines.npz.tmp"
+    manifest_staging = destination / ".manifest.json.tmp"
+    try:
+        torch.save(cnn_state, state_staging)
+        with baseline_staging.open("wb") as stream:
+            np.savez(stream, **baseline_arrays)
+            stream.flush()
+            os.fsync(stream.fileno())
+        saved_manifest = replace(
+            manifest,
+            cnn_sha256=sha256_file(state_staging),
+            baselines_sha256=sha256_file(baseline_staging),
+        )
+        _validate_manifest(saved_manifest)
+        os.replace(state_staging, state_path)
+        os.replace(baseline_staging, baseline_path)
+        with manifest_staging.open("w") as stream:
+            stream.write(json.dumps(asdict(saved_manifest), indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(manifest_staging, manifest_path)
+        return saved_manifest
+    finally:
+        for staging_path in (state_staging, baseline_staging, manifest_staging):
+            staging_path.unlink(missing_ok=True)
+
+
+def sha256_file(path: Path | str) -> str:
+    """Return the lowercase SHA-256 digest of a file without loading it all at once."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_validated_state_from_memory(
@@ -403,6 +459,13 @@ def load_frozen_package(
             raise ValueError("expected data mode must be genuine or synthetic")
         if manifest.data_mode != expected_data_mode:
             raise ValueError("frozen package data mode does not match expectation")
+    expected_digests = (manifest.cnn_sha256, manifest.baselines_sha256)
+    actual_digests = (sha256_file(required[1]), sha256_file(required[2]))
+    if not all(
+        hmac.compare_digest(str(expected), actual)
+        for expected, actual in zip(expected_digests, actual_digests)
+    ):
+        raise ValueError("frozen package binary digest mismatch")
     state = _load_validated_state(required[1], manifest)
     baselines = _restore_baselines(required[2], manifest)
     return manifest, state, baselines

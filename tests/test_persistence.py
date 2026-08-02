@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -53,8 +54,8 @@ def _save_valid_package(
 ) -> tuple[FrozenManifest, np.ndarray, dict[str, torch.Tensor], object]:
     manifest = _manifest(data_mode=data_mode)
     features, state, baselines = _artifacts()
-    save_frozen_package(tmp_path, manifest, state, baselines)
-    return manifest, features, state, baselines
+    saved_manifest = save_frozen_package(tmp_path, manifest, state, baselines)
+    return saved_manifest, features, state, baselines
 
 
 def test_frozen_package_round_trip_preserves_safe_predictions_and_baselines(tmp_path) -> None:
@@ -63,6 +64,8 @@ def test_frozen_package_round_trip_preserves_safe_predictions_and_baselines(tmp_
     loaded_manifest, loaded_state, loaded_baselines = load_frozen_package(tmp_path)
 
     assert loaded_manifest == manifest
+    assert len(loaded_manifest.cnn_sha256) == 64
+    assert len(loaded_manifest.baselines_sha256) == 64
     assert loaded_manifest.library_versions == manifest.library_versions
     assert set(current_library_versions()).issubset(loaded_manifest.library_versions)
     assert loaded_baselines.majority_class == baselines.majority_class
@@ -154,8 +157,39 @@ def test_load_rejects_state_shape_mismatch(tmp_path) -> None:
     state["head.1.weight"] = torch.zeros((2, 48))
     torch.save(state, tmp_path / "cnn_lstm.pt")
 
-    with pytest.raises(ValueError, match="incompatible frozen CNN-LSTM state"):
+    with pytest.raises(ValueError, match="digest"):
         load_frozen_package(tmp_path)
+
+
+@pytest.mark.parametrize("filename", ["cnn_lstm.pt", "baselines.npz"])
+def test_load_rejects_frozen_binary_tampering_before_deserialization(
+    tmp_path, filename: str, monkeypatch
+) -> None:
+    _save_valid_package(tmp_path)
+    path = tmp_path / filename
+    payload = bytearray(path.read_bytes())
+    payload[len(payload) // 2] ^= 1
+    path.write_bytes(payload)
+
+    def forbid_deserialization(*args, **kwargs):
+        raise AssertionError("tampered package reached deserialization")
+
+    monkeypatch.setattr("src.persistence.torch.load", forbid_deserialization)
+    monkeypatch.setattr("src.persistence.np.load", forbid_deserialization)
+    with pytest.raises(ValueError, match="digest"):
+        load_frozen_package(tmp_path)
+
+
+def test_committed_genuine_frozen_package_loads_from_a_clean_clone() -> None:
+    root = Path(__file__).resolve().parents[1]
+    manifest, state, baselines = load_frozen_package(
+        root / "artifacts/final/frozen", expected_data_mode="genuine"
+    )
+
+    assert manifest.cnn_sha256 == "670265c722336bfd4c1fb4d0ac035ed4fad9a657427f3d26733f96f433ffced6"
+    assert manifest.baselines_sha256 == "8cb39d6b8ab30c7482ed83ebc0d4840f52c6bff5591f2089cd29ba2dcf59f84f"
+    assert state
+    assert baselines.majority_class in {0, 1, 2}
 
 
 @pytest.mark.parametrize(
@@ -205,5 +239,5 @@ def test_load_rejects_baseline_feature_mismatch(tmp_path) -> None:
     arrays["logistic_n_features_in"] = np.array([12], dtype=np.int64)
     np.savez(baseline_path, **arrays)
 
-    with pytest.raises(ValueError, match="incompatible frozen baselines"):
+    with pytest.raises(ValueError, match="digest"):
         load_frozen_package(tmp_path)
