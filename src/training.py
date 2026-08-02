@@ -149,3 +149,26 @@ def train_model(bundle: DatasetBundle, config: TrainConfig) -> TrainResult:
         best_state={key: value.detach().cpu() for key, value in best_state.items()},
         device=str(device),
     )
+
+
+def predict_probabilities(
+    state: dict[str, torch.Tensor],
+    features: np.ndarray,
+    batch_size: int = 256,
+    device: str | None = None,
+) -> np.ndarray:
+    """Predict class probabilities from a frozen CNN-LSTM state dictionary."""
+    if features.ndim != 3 or len(features) == 0:
+        raise ValueError("features must be a non-empty [samples, time, features] array")
+    selected_device = _choose_device(device)
+    model = CNNLSTM(n_features=features.shape[-1]).to(selected_device)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    loader = DataLoader(TensorDataset(torch.from_numpy(features)), batch_size=batch_size)
+    probabilities = []
+    with torch.inference_mode():
+        for (batch,) in loader:
+            probabilities.append(
+                torch.softmax(model(batch.to(selected_device)), dim=1).cpu().numpy()
+            )
+    return np.concatenate(probabilities)
