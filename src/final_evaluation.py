@@ -172,14 +172,25 @@ def save_model_regime_diagram(destination: Path) -> Path:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     boxes = [
-        (0.09, 0.50, "Hourly BTC / ETH\ncausal features", "#E8F1FA"),
-        (0.28, 0.50, "Frozen scaling\n96 x 13 window", "#D5E8D4"),
-        (0.50, 0.72, "Conv1D + LSTM\n3-class softmax", "#FFF2CC"),
-        (0.70, 0.72, "Down / Flat / Up\nnext-hour forecast", "#F8CECC"),
-        (0.60, 0.27, "Frozen 168 h volatility\nLow / Medium / High", "#E1D5E7"),
+        (
+            0.075,
+            0.50,
+            "Hourly BTC / ETH\ncausal inputs + unscaled log returns",
+            "#E8F1FA",
+        ),
+        (0.255, 0.73, "Frozen scaling\n96 x 13 window", "#D5E8D4"),
+        (0.445, 0.73, "Conv1D + LSTM\n3-class softmax", "#FFF2CC"),
+        (0.625, 0.73, "Down / Flat / Up\nnext-hour forecast", "#F8CECC"),
+        (
+            0.325,
+            0.25,
+            "168 h realized volatility\n+ frozen train-only thresholds",
+            "#E1D5E7",
+        ),
+        (0.625, 0.25, "Frozen volatility regime\nLow / Medium / High", "#E1D5E7"),
         (0.91, 0.50, "Slice metrics +\nqualitative examples", "#DAE8FC"),
     ]
-    figure, axis = plt.subplots(figsize=(10.4, 2.2))
+    figure, axis = plt.subplots(figsize=(12.0, 2.4))
     axis.axis("off")
     for x, y, label, color in boxes:
         axis.text(
@@ -192,12 +203,13 @@ def save_model_regime_diagram(destination: Path) -> Path:
             bbox={"boxstyle": "round,pad=0.45", "facecolor": color, "edgecolor": "#555555"},
         )
     arrows = [
-        ((0.15, 0.50), (0.22, 0.50)),
-        ((0.35, 0.55), (0.43, 0.68)),
-        ((0.35, 0.45), (0.51, 0.30)),
-        ((0.57, 0.72), (0.63, 0.72)),
-        ((0.77, 0.69), (0.84, 0.56)),
-        ((0.69, 0.30), (0.84, 0.45)),
+        ((0.14, 0.55), (0.20, 0.68)),
+        ((0.14, 0.45), (0.235, 0.29)),
+        ((0.32, 0.73), (0.38, 0.73)),
+        ((0.51, 0.73), (0.56, 0.73)),
+        ((0.70, 0.69), (0.84, 0.56)),
+        ((0.43, 0.25), (0.52, 0.25)),
+        ((0.72, 0.29), (0.84, 0.44)),
     ]
     for start, end in arrows:
         axis.annotate(

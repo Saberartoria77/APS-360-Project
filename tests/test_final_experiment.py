@@ -1,6 +1,7 @@
 import csv
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,9 @@ from run_final_experiment import (
     HISTORICAL_START,
     PROSPECTIVE_CONTEXT_END,
     PROSPECTIVE_CONTEXT_START,
+    _validate_prospective_frame,
     _validate_hourly_frame,
+    main,
     run_historical_stage,
     run_prospective_stage,
 )
@@ -59,6 +62,8 @@ def test_prospective_dry_run_scores_only_july_and_writes_artifacts(
     assert result["data"]["source_start"] == PROSPECTIVE_CONTEXT_START
     assert result["data"]["source_end_exclusive"] == PROSPECTIVE_CONTEXT_END
     assert result["data"]["sample_count"] == 31 * 24 * 2
+    assert result["data"]["first_scored_timestamp"] == "2026-07-01T00:00:00Z"
+    assert result["data"]["last_scored_timestamp"] == "2026-07-31T23:00:00Z"
     assert sum(result["data"]["class_counts"]) == result["data"]["sample_count"]
     required = [
         "prospective_results.json",
@@ -96,6 +101,45 @@ def test_prospective_dry_run_is_deterministic_for_same_frozen_package(
 
     assert first == second
     assert (tmp_path / "qualitative_examples.csv").read_bytes() == first_examples
+
+
+def test_prospective_stage_never_retrains(tmp_path: Path, monkeypatch) -> None:
+    run_historical_stage(tmp_path, dry_run=True, epochs=1, seeds=(42,))
+
+    def forbid_training(*args, **kwargs):
+        raise AssertionError("prospective stage attempted model training")
+
+    monkeypatch.setattr("run_final_experiment.train_model", forbid_training)
+    run_prospective_stage(tmp_path, dry_run=True)
+
+
+@pytest.mark.parametrize("truncate", ["start", "end"])
+def test_prospective_frame_requires_exact_913_hour_coverage(truncate: str) -> None:
+    index = pd.date_range(
+        PROSPECTIVE_CONTEXT_START,
+        PROSPECTIVE_CONTEXT_END,
+        freq="h",
+        inclusive="left",
+    )
+    valid = pd.DataFrame({"close": np.ones(len(index))}, index=index)
+    assert len(valid) == 913
+    _validate_prospective_frame("BTCUSDT", valid)
+
+    truncated = valid.iloc[1:] if truncate == "start" else valid.iloc[:-1]
+    with pytest.raises(ValueError, match="exact prospective context coverage"):
+        _validate_prospective_frame("BTCUSDT", truncated)
+
+
+@pytest.mark.parametrize("flag", ["--epochs", "--seed", "--tuning"])
+def test_prospective_cli_rejects_training_and_tuning_flags(
+    flag: str, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["run_final_experiment.py", "prospective", flag, "1"]
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
 
 
 def test_transfer_matrix_contains_all_low_high_combinations() -> None:
