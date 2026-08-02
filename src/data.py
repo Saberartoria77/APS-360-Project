@@ -63,6 +63,70 @@ class DatasetBundle:
     threshold: float
 
 
+@dataclass
+class EvaluationDataset:
+    """Prospective windows transformed with frozen training metadata."""
+
+    x: np.ndarray
+    y: np.ndarray
+    times: np.ndarray
+    symbols: np.ndarray
+
+
+def prepare_evaluation_windows(
+    frames: dict[str, pd.DataFrame],
+    feature_names: list[str],
+    scaler_mean: np.ndarray,
+    scaler_scale: np.ndarray,
+    threshold: float,
+    window: int,
+    target_start: pd.Timestamp,
+    target_end: pd.Timestamp,
+) -> EvaluationDataset:
+    """Build labelled prospective windows without fitting any preprocessing."""
+    start = pd.Timestamp(target_start)
+    end = pd.Timestamp(target_end)
+    start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+    if start >= end:
+        raise ValueError("target_start must be before target_end")
+
+    scaler_mean = np.asarray(scaler_mean, dtype=np.float64)
+    scaler_scale = np.asarray(scaler_scale, dtype=np.float64)
+    if len(feature_names) != len(scaler_mean) or scaler_mean.shape != scaler_scale.shape:
+        raise ValueError("frozen feature and scaler metadata are incompatible")
+
+    collected: dict[str, list] = {"x": [], "y": [], "times": [], "symbols": []}
+    for symbol, frame in frames.items():
+        required = {"close", *feature_names}
+        if missing := required.difference(frame.columns):
+            raise ValueError(f"{symbol} is missing columns: {sorted(missing)}")
+
+        subset = frame.copy()
+        subset["label"] = make_direction_labels(subset["close"], horizon=1, threshold=threshold)
+        subset = subset.dropna(subset=[*feature_names, "label"])
+        values = (subset[feature_names].to_numpy(dtype=np.float64) - scaler_mean) / scaler_scale
+        labels = subset["label"].to_numpy(dtype=np.int64)
+        times = subset.index.to_numpy(dtype="datetime64[ns]")
+        for end_position in range(window - 1, len(subset)):
+            timestamp = subset.index[end_position]
+            if start <= timestamp < end:
+                collected["x"].append(values[end_position - window + 1 : end_position + 1])
+                collected["y"].append(labels[end_position])
+                collected["times"].append(times[end_position])
+                collected["symbols"].append(symbol)
+
+    if not collected["x"]:
+        raise ValueError("requested target range produced no complete evaluation windows")
+    order = np.argsort(np.asarray(collected["times"]))
+    return EvaluationDataset(
+        x=np.asarray(collected["x"], dtype=np.float32)[order],
+        y=np.asarray(collected["y"], dtype=np.int64)[order],
+        times=np.asarray(collected["times"])[order],
+        symbols=np.asarray(collected["symbols"])[order],
+    )
+
+
 def prepare_datasets(
     frames: dict[str, pd.DataFrame],
     window: int = 96,
