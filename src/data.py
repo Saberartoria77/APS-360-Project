@@ -84,6 +84,11 @@ def prepare_evaluation_windows(
     target_end: pd.Timestamp,
 ) -> EvaluationDataset:
     """Build labelled prospective windows without fitting any preprocessing."""
+    if not isinstance(window, (int, np.integer)) or window < 2:
+        raise ValueError("window must be at least two")
+    if not frames:
+        raise ValueError("at least one symbol frame is required")
+
     start = pd.Timestamp(target_start)
     end = pd.Timestamp(target_end)
     start = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
@@ -91,18 +96,37 @@ def prepare_evaluation_windows(
     if start >= end:
         raise ValueError("target_start must be before target_end")
 
+    feature_array = np.asarray(feature_names, dtype=object)
     scaler_mean = np.asarray(scaler_mean, dtype=np.float64)
     scaler_scale = np.asarray(scaler_scale, dtype=np.float64)
-    if len(feature_names) != len(scaler_mean) or scaler_mean.shape != scaler_scale.shape:
+    if (
+        feature_array.ndim != 1
+        or not len(feature_array)
+        or scaler_mean.ndim != 1
+        or scaler_scale.ndim != 1
+        or len(feature_array) != len(scaler_mean)
+        or scaler_mean.shape != scaler_scale.shape
+        or not np.all(np.isfinite(scaler_mean))
+        or not np.all(np.isfinite(scaler_scale))
+        or np.any(scaler_scale == 0.0)
+    ):
         raise ValueError("frozen feature and scaler metadata are incompatible")
 
     collected: dict[str, list] = {"x": [], "y": [], "times": [], "symbols": []}
     for symbol, frame in frames.items():
+        if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
+            raise ValueError(f"{symbol} index must be timezone-aware")
+        if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+            raise ValueError(f"{symbol} index must be unique and chronological")
+        if not np.all(np.diff(frame.index.asi8) == pd.Timedelta(hours=1).value):
+            raise ValueError(f"{symbol} index must be hourly contiguous")
+
         required = {"close", *feature_names}
         if missing := required.difference(frame.columns):
             raise ValueError(f"{symbol} is missing columns: {sorted(missing)}")
 
         subset = frame.copy()
+        subset.index = subset.index.tz_convert("UTC")
         subset["label"] = make_direction_labels(subset["close"], horizon=1, threshold=threshold)
         subset = subset.dropna(subset=[*feature_names, "label"])
         values = (subset[feature_names].to_numpy(dtype=np.float64) - scaler_mean) / scaler_scale
