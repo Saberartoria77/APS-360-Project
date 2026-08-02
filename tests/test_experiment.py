@@ -12,6 +12,7 @@ def test_experiment_dry_run_writes_required_artifacts(tmp_path: Path) -> None:
         "metrics/results.json",
         "metrics/prediction_examples.csv",
         "figures/data_summary.png",
+        "figures/confusion_majority.png",
         "figures/confusion_momentum.png",
         "figures/confusion_logistic_regression.png",
         "figures/confusion_cnn_lstm.png",
@@ -20,7 +21,12 @@ def test_experiment_dry_run_writes_required_artifacts(tmp_path: Path) -> None:
     ]
     assert all((tmp_path / name).exists() for name in required)
     assert result["configuration"]["dry_run"] is True
-    assert set(result["models"]) == {"momentum", "logistic_regression", "cnn_lstm"}
+    assert set(result["models"]) == {
+        "majority",
+        "momentum",
+        "logistic_regression",
+        "cnn_lstm",
+    }
     assert result["data"]["train_samples"] > 0
     assert json.loads((tmp_path / "metrics/results.json").read_text())["model_parameter_count"] > 0
 

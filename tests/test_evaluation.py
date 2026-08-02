@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.baselines import fit_baselines
+from src.baselines import fit_baseline_models, fit_baselines, predict_baselines
 from src.data import DatasetBundle, FEATURE_COLUMNS
 from src.evaluation import classification_metrics, representative_predictions, save_confusion_matrix
 
@@ -43,9 +43,26 @@ def test_classification_metrics_has_required_fields() -> None:
 
 def test_baselines_return_one_prediction_per_test_sample(bundle: DatasetBundle) -> None:
     predictions = fit_baselines(bundle)
-    assert set(predictions) == {"momentum", "logistic_regression"}
+    assert set(predictions) == {"majority", "momentum", "logistic_regression"}
     assert all(len(values) == len(bundle.y_test) for values in predictions.values())
     assert all(set(np.unique(values)).issubset({0, 1, 2}) for values in predictions.values())
+
+
+def test_majority_baseline_uses_training_labels(bundle: DatasetBundle) -> None:
+    bundle.y_train[:] = 2
+    bundle.y_train[0] = 0
+    bundle.y_train[1] = 1
+    models = fit_baseline_models(bundle.x_train, bundle.y_train)
+    predictions = predict_baselines(
+        models,
+        bundle.x_test,
+        bundle.feature_names,
+        bundle.scaler_mean,
+        bundle.scaler_scale,
+        bundle.threshold,
+    )
+    assert set(predictions) == {"majority", "momentum", "logistic_regression"}
+    assert np.all(predictions["majority"] == 2)
 
 
 def test_confusion_matrix_plot_is_written(tmp_path: Path) -> None:
@@ -63,4 +80,3 @@ def test_representative_predictions_contains_correct_and_error_examples(bundle: 
     )
     assert {"correct", "error"}.issubset(set(examples["example_type"]))
     assert set(examples.columns) >= {"timestamp", "symbol", "true_class", "predicted_class", "confidence"}
-
