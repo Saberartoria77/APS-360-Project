@@ -1,6 +1,17 @@
 # Cross-Regime Generalization in Cryptocurrency Direction Prediction
 
-An APS360 project studying the feasibility and robustness of next-hour BTC/ETH direction classification with a hybrid CNN-LSTM. The long-term question is how predictive performance changes under market regime shift; the current repository contains the completed progress-report checkpoint.
+An APS360 project studying the feasibility and robustness of next-hour BTC/ETH direction classification with a hybrid CNN-LSTM. The final evaluation measures historical volatility-regime transfer and a frozen one-time prospective test on July 2026.
+
+## Final evaluation
+
+```bash
+python run_final_experiment.py historical --output-dir artifacts/final --epochs 12
+python run_final_experiment.py prospective --output-dir artifacts/final
+```
+
+The prospective command requires the frozen package created by the historical command and scores only July 2026 forecast origins. Run historical first, commit or otherwise freeze its manifest and result evidence, and do not rerun prospective as a tuning loop.
+
+The genuine frozen CNN-LSTM reached 0.409 macro-F1 and 0.489 accuracy on 1,488 July targets. Its historical three-seed macro-F1 was $0.429\pm0.004$; explicit low/high regime transfer produced negative paired changes in both directions. See `final_report.pdf` for definitions, baselines, uncertainty, limitations, and the full interpretation.
 
 ## Progress checkpoint
 

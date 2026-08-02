@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'proposal.tex'
+      - 'final_report.tex'
       - 'refs.bib'
       - 'APS360.sty'
       - '.github/workflows/latex-compile.yml'
@@ -28,10 +28,10 @@ jobs:
 
       - name: Compile LaTeX
         run: |
-          latexmk -pdf -interaction=nonstopmode -halt-on-error proposal.tex
+          latexmk -pdf -interaction=nonstopmode -halt-on-error final_report.tex
 
       - name: Upload PDF artifact
         uses: actions/upload-artifact@v4
         with:
-          name: proposal-pdf
-          path: proposal.pdf
+          name: final-report-pdf
+          path: final_report.pdf
