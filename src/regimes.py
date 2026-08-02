@@ -58,6 +58,10 @@ def assign_regimes(
     symbols: np.ndarray,
     thresholds: RegimeThresholds,
 ) -> np.ndarray:
+    times = np.asarray(times)
+    symbols = np.asarray(symbols)
+    if times.ndim != 1 or symbols.ndim != 1 or times.shape != symbols.shape:
+        raise ValueError("times and symbols must be one-dimensional arrays with the same shape")
     labels = np.empty(len(times), dtype="<U6")
     volatility = {
         symbol: realized_volatility(frame, thresholds.lookback)

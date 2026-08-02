@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.data import DatasetBundle, FEATURE_COLUMNS
 from src.regimes import (
@@ -11,7 +12,7 @@ from src.regimes import (
 
 
 def _frames() -> dict[str, pd.DataFrame]:
-    index = pd.date_range("2025-01-01", periods=360, freq="h", tz="UTC")
+    index = pd.date_range("2025-01-01", periods=400, freq="h", tz="UTC")
     frames = {}
     for symbol, scale in [("BTCUSDT", 0.002), ("ETHUSDT", 0.006)]:
         returns = scale * (1.0 + np.sin(np.arange(len(index)) / 17.0))
@@ -71,3 +72,29 @@ def test_subset_bundle_preserves_alignment() -> None:
     np.testing.assert_array_equal(subset.test_times, bundle.test_times[masks["test"]])
     np.testing.assert_array_equal(subset.test_symbols, bundle.test_symbols[masks["test"]])
     assert subset.feature_names == bundle.feature_names
+
+
+def test_assign_regimes_rejects_mismatched_times_and_symbols() -> None:
+    frames = _frames()
+    thresholds = fit_regime_thresholds(frames, train_end=frames["BTCUSDT"].index[260], lookback=24)
+
+    with pytest.raises(ValueError, match="same shape"):
+        assign_regimes(
+            frames,
+            np.array([frames["BTCUSDT"].index[280].to_datetime64()]),
+            np.array(["BTCUSDT", "ETHUSDT"]),
+            thresholds,
+        )
+
+
+def test_assign_bundle_regimes_returns_aligned_split_labels() -> None:
+    frames = _frames()
+    bundle = _bundle()
+    thresholds = fit_regime_thresholds(frames, train_end=frames["BTCUSDT"].index[260], lookback=24)
+
+    regimes = assign_bundle_regimes(bundle, frames, thresholds)
+
+    assert set(regimes) == {"train", "val", "test"}
+    for split in regimes:
+        assert regimes[split].shape == getattr(bundle, f"y_{split}").shape
+        assert set(regimes[split]).issubset({"low", "medium", "high"})
