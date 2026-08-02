@@ -661,6 +661,124 @@ def run_historical_stage(
     return results
 
 
+def recompute_historical_transfer_stage(
+    output_dir: Path | str = Path("artifacts/final"),
+    *,
+    dry_run: bool = False,
+    epochs: int = 12,
+    seeds: tuple[int, ...] = SEEDS,
+) -> dict:
+    """Recompute only digest-bound transfer evidence without touching frozen or July state."""
+    output_dir = Path(output_dir)
+    historical_path = output_dir / "historical_results.json"
+    if not historical_path.is_file():
+        raise ValueError("historical results are required for transfer recomputation")
+    try:
+        historical = json.loads(historical_path.read_text())
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("historical results are invalid") from error
+    data_mode = "synthetic" if dry_run else "genuine"
+    if historical.get("configuration", {}).get("data_mode") != data_mode:
+        raise ValueError("historical result data mode does not match recomputation")
+    seeds = tuple(int(seed) for seed in seeds)
+    if epochs < 1 or not seeds or len(set(seeds)) != len(seeds):
+        raise ValueError("recomputation epochs and seeds are invalid")
+    if not dry_run and (epochs != 12 or seeds != SEEDS):
+        raise ValueError("genuine transfer recomputation requires the frozen 12-epoch seed protocol")
+
+    raw_frames: dict[str, pd.DataFrame] = {}
+    for symbol in SYMBOLS:
+        if dry_run:
+            frame = _synthetic_ohlcv(symbol, periods=SYNTHETIC_HISTORICAL_ROWS)
+        else:
+            cache_path = (
+                Path("data/raw")
+                / f"{symbol}_1h_{HISTORICAL_START}_{HISTORICAL_END}.csv"
+            )
+            if not cache_path.is_file():
+                raise ValueError(
+                    "historical-only recomputation requires the existing pre-July cache"
+                )
+            frame = fetch_klines(
+                symbol,
+                pd.Timestamp(HISTORICAL_START, tz="UTC"),
+                pd.Timestamp(HISTORICAL_END, tz="UTC"),
+                cache_path=cache_path,
+            )
+        _validate_hourly_frame(symbol, frame, data_mode=data_mode)
+        raw_frames[symbol] = frame
+
+    feature_frames = {
+        symbol: engineer_features(frame) for symbol, frame in raw_frames.items()
+    }
+    bundle = prepare_datasets(feature_frames, window=96)
+    thresholds = fit_regime_thresholds(
+        feature_frames, train_end=pd.Timestamp(bundle.train_times.max()), lookback=168
+    )
+    saved_thresholds = historical.get("regime_thresholds")
+    if not isinstance(saved_thresholds, dict) or any(
+        not np.array_equal(
+            np.asarray(saved_thresholds.get(symbol), dtype=float),
+            np.asarray(thresholds.by_symbol[symbol], dtype=float),
+        )
+        for symbol in SYMBOLS
+    ):
+        raise ValueError("recomputed regime thresholds do not match frozen historical evidence")
+    regimes = _bundle_regimes_with_warmup(bundle, feature_frames, thresholds)
+    if any(
+        not np.isin(regimes[split], ["low", "medium", "high"]).all()
+        for split in ("val", "test")
+    ):
+        raise ValueError("validation and test samples require complete regime history")
+    cross_rows, cnn_seed_metrics = _evaluate_cross_regime(
+        bundle,
+        regimes,
+        seeds=seeds,
+        epochs=epochs,
+        dry_run=dry_run,
+    )
+    paired_cnn_changes = paired_transfer_changes(cnn_seed_metrics)
+    historical["cross_regime_evaluation"] = {
+        "rows": cross_rows,
+        "cnn_seed_metrics": [
+            {
+                "train_regime": train_regime,
+                "test_regime": test_regime,
+                "seeds": [
+                    {"seed": seed, "metrics": metrics}
+                    for seed, metrics in sorted(
+                        cnn_seed_metrics[(train_regime, test_regime)].items()
+                    )
+                ],
+            }
+            for train_regime, test_regime in transfer_pairs()
+        ],
+        "paired_cnn_transfer_macro_f1_changes": paired_cnn_changes,
+        "transfer_macro_f1_changes": [
+            *_deterministic_transfer_changes(cross_rows),
+            *paired_cnn_changes,
+        ],
+        "recomputation_provenance": {
+            "protocol": "same-checkpoint-paired-v2",
+            "prospective_data_accessed": False,
+            "frozen_global_model_changed": False,
+        },
+    }
+    staging_dir = Path(tempfile.mkdtemp(prefix=".transfer-staging-", dir=output_dir))
+    try:
+        staged_json = staging_dir / "historical_results.json"
+        staged_csv = staging_dir / "cross_regime_results.csv"
+        staged_json.write_text(json.dumps(historical, indent=2))
+        pd.DataFrame(cross_rows).to_csv(staged_csv, index=False)
+        if not staged_json.stat().st_size or not staged_csv.stat().st_size:
+            raise ValueError("historical transfer staging failed validation")
+        os.replace(staged_json, historical_path)
+        os.replace(staged_csv, output_dir / "cross_regime_results.csv")
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    return historical
+
+
 def _prospective_raw_frames(dry_run: bool) -> dict[str, pd.DataFrame]:
     """Load the exact causal context, with deterministic synthetic data for tests."""
     context_start = pd.Timestamp(PROSPECTIVE_CONTEXT_START)
@@ -859,6 +977,10 @@ def main() -> None:
     prospective = subparsers.add_parser("prospective")
     prospective.add_argument("--output-dir", type=Path, default=Path("artifacts/final"))
     prospective.add_argument("--dry-run", action="store_true")
+    recompute = subparsers.add_parser("recompute-transfer")
+    recompute.add_argument("--output-dir", type=Path, default=Path("artifacts/final"))
+    recompute.add_argument("--dry-run", action="store_true")
+    recompute.add_argument("--epochs", type=int, default=12)
     arguments = parser.parse_args()
     if arguments.stage == "historical":
         result = run_historical_stage(
@@ -866,10 +988,16 @@ def main() -> None:
             dry_run=arguments.dry_run,
             epochs=arguments.epochs,
         )
-    else:
+    elif arguments.stage == "prospective":
         result = run_prospective_stage(
             output_dir=arguments.output_dir,
             dry_run=arguments.dry_run,
+        )
+    else:
+        result = recompute_historical_transfer_stage(
+            output_dir=arguments.output_dir,
+            dry_run=arguments.dry_run,
+            epochs=arguments.epochs,
         )
     print(json.dumps(result, indent=2))
 

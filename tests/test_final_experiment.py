@@ -7,6 +7,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+import run_final_experiment as final_runner
 
 from run_final_experiment import (
     HISTORICAL_END,
@@ -505,3 +506,31 @@ def test_historical_dry_run_writes_valid_results_and_frozen_package(
         representative_json["macro_f1_mean"]
     )
     assert int(representative["sample_count"]) == representative_json["sample_count"]
+
+
+def test_transfer_recompute_updates_only_historical_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_historical_stage(tmp_path, dry_run=True, epochs=1, seeds=(42,))
+    frozen_hashes = {
+        path.name: sha256_file(path) for path in (tmp_path / "frozen").iterdir()
+    }
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("historical-only recomputation touched prospective or frozen state")
+
+    monkeypatch.setattr("run_final_experiment._prospective_raw_frames", forbidden)
+    monkeypatch.setattr("run_final_experiment.save_frozen_package", forbidden)
+    result = final_runner.recompute_historical_transfer_stage(
+        tmp_path, dry_run=True, epochs=1, seeds=(42,)
+    )
+
+    assert result["cross_regime_evaluation"]["recomputation_provenance"] == {
+        "protocol": "same-checkpoint-paired-v2",
+        "prospective_data_accessed": False,
+        "frozen_global_model_changed": False,
+    }
+    assert frozen_hashes == {
+        path.name: sha256_file(path) for path in (tmp_path / "frozen").iterdir()
+    }
+    assert not (tmp_path / "prospective_results.json").exists()
