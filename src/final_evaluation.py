@@ -17,6 +17,43 @@ def transfer_pairs() -> list[tuple[str, str]]:
     ]
 
 
+def paired_transfer_changes(
+    seed_metrics: dict[tuple[str, str], dict[int, dict]],
+) -> list[dict]:
+    """Compute opposite-minus-matching macro-F1 per seed before aggregation."""
+    output = []
+    for train_regime, opposite_regime in (("low", "high"), ("high", "low")):
+        matching = seed_metrics[(train_regime, train_regime)]
+        opposite = seed_metrics[(train_regime, opposite_regime)]
+        if not matching or set(matching) != set(opposite):
+            raise ValueError("matching and opposite transfer results require identical seeds")
+        per_seed = [
+            {
+                "seed": int(seed),
+                "macro_f1_change": float(
+                    opposite[seed]["macro_f1"] - matching[seed]["macro_f1"]
+                ),
+            }
+            for seed in sorted(matching)
+        ]
+        values = np.asarray(
+            [entry["macro_f1_change"] for entry in per_seed], dtype=float
+        )
+        output.append(
+            {
+                "train_regime": train_regime,
+                "model": "cnn_lstm",
+                "matching_test_regime": train_regime,
+                "opposite_test_regime": opposite_regime,
+                "seed_count": len(per_seed),
+                "macro_f1_change_mean": float(values.mean()),
+                "macro_f1_change_std": float(values.std(ddof=0)),
+                "per_seed": per_seed,
+            }
+        )
+    return output
+
+
 def evaluate_slices(
     y_true: np.ndarray,
     predictions: dict[str, np.ndarray],
@@ -62,14 +99,27 @@ def evaluate_slices(
 
 
 def aggregate_seed_metrics(seed_results: list[dict]) -> dict:
-    """Summarize the two primary metrics across deterministic seed runs."""
+    """Summarize scalar metrics and class recall across deterministic seed runs."""
     if not seed_results:
         raise ValueError("at least one seed result is required")
     keys = ("accuracy", "macro_f1")
-    return {
+    output = {
         key: {
             "mean": float(np.mean([result[key] for result in seed_results])),
             "std": float(np.std([result[key] for result in seed_results], ddof=0)),
         }
         for key in keys
     }
+    recalls = np.asarray(
+        [result["per_class_recall"] for result in seed_results], dtype=float
+    )
+    if recalls.shape != (len(seed_results), 3):
+        raise ValueError("each seed result must contain three per-class recalls")
+    output["per_class_recall"] = {
+        name: {
+            "mean": float(recalls[:, index].mean()),
+            "std": float(recalls[:, index].std(ddof=0)),
+        }
+        for index, name in enumerate(("down", "flat", "up"))
+    }
+    return output

@@ -77,6 +77,7 @@ class FrozenManifest:
     development_end: str
     prospective_start: str
     prospective_end: str
+    data_mode: str
     model_n_features: int = 13
     model_conv_channels: int = 32
     model_hidden_size: int = 48
@@ -121,6 +122,7 @@ def create_frozen_manifest(
     config: TrainConfig,
     device: str | None,
     validation_loss: float,
+    data_mode: str,
     development_start: str = "2023-07-01T00:00:00Z",
     development_end: str = "2026-07-01T00:00:00Z",
     prospective_start: str = "2026-07-01T00:00:00Z",
@@ -141,6 +143,7 @@ def create_frozen_manifest(
         development_end=development_end,
         prospective_start=prospective_start,
         prospective_end=prospective_end,
+        data_mode=data_mode,
         training_epochs=config.epochs,
         training_batch_size=config.batch_size,
         training_learning_rate=config.learning_rate,
@@ -204,6 +207,8 @@ def _validate_manifest(manifest: FrozenManifest) -> None:
     ):
         raise ValueError("incompatible frozen manifest")
     if any(getattr(manifest, name) != value for name, value in _EXACT_DATES.items()):
+        raise ValueError("incompatible frozen manifest")
+    if manifest.data_mode not in {"genuine", "synthetic"}:
         raise ValueError("incompatible frozen manifest")
     if any(getattr(manifest, name) != value for name, value in _MODEL_DEFAULTS.items()):
         raise ValueError("incompatible frozen manifest")
@@ -381,6 +386,7 @@ def _load_validated_state_from_memory(
 
 def load_frozen_package(
     source: Path,
+    expected_data_mode: str | None = None,
 ) -> tuple[FrozenManifest, dict[str, torch.Tensor], BaselineModels]:
     """Load a complete, compatible frozen package without unpickling input."""
     source = Path(source)
@@ -392,6 +398,11 @@ def load_frozen_package(
     if not all(path.is_file() for path in required):
         raise ValueError("incomplete frozen package")
     manifest = _load_manifest(required[0])
+    if expected_data_mode is not None:
+        if expected_data_mode not in {"genuine", "synthetic"}:
+            raise ValueError("expected data mode must be genuine or synthetic")
+        if manifest.data_mode != expected_data_mode:
+            raise ValueError("frozen package data mode does not match expectation")
     state = _load_validated_state(required[1], manifest)
     baselines = _restore_baselines(required[2], manifest)
     return manifest, state, baselines

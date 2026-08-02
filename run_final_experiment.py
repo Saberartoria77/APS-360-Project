@@ -14,7 +14,12 @@ from run_experiment import SYMBOLS, _synthetic_ohlcv
 from src.baselines import fit_baseline_models, predict_baselines
 from src.data import FEATURE_COLUMNS, DatasetBundle, engineer_features, fetch_klines, prepare_datasets
 from src.evaluation import classification_metrics
-from src.final_evaluation import aggregate_seed_metrics, evaluate_slices, transfer_pairs
+from src.final_evaluation import (
+    aggregate_seed_metrics,
+    evaluate_slices,
+    paired_transfer_changes,
+    transfer_pairs,
+)
 from src.persistence import create_frozen_manifest, save_frozen_package
 from src.regimes import (
     RegimeThresholds,
@@ -31,23 +36,35 @@ HISTORICAL_END = "2026-07-01"
 PROSPECTIVE_START = "2026-07-01T00:00:00Z"
 PROSPECTIVE_END = "2026-08-01T00:00:00Z"
 SEEDS = (42, 43, 44)
+SYNTHETIC_HISTORICAL_START = "2024-01-01T00:00:00Z"
+SYNTHETIC_HISTORICAL_END = "2024-02-11T16:00:00Z"
+SYNTHETIC_HISTORICAL_ROWS = 1000
 
 
-def _validate_hourly_frame(symbol: str, frame: pd.DataFrame) -> None:
+def _validate_hourly_frame(
+    symbol: str, frame: pd.DataFrame, *, data_mode: str
+) -> None:
     if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
         raise ValueError(f"{symbol} index must be timezone-aware")
     if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
         raise ValueError(f"{symbol} index must be unique and chronological")
     if not np.all(np.diff(frame.index.asi8) == pd.Timedelta(hours=1).value):
         raise ValueError(f"{symbol} index must be hourly contiguous")
-    historical_start = pd.Timestamp(HISTORICAL_START, tz="UTC")
-    historical_end = pd.Timestamp(HISTORICAL_END, tz="UTC")
+    if data_mode == "genuine":
+        expected_start = pd.Timestamp(HISTORICAL_START, tz="UTC")
+        expected_end = pd.Timestamp(HISTORICAL_END, tz="UTC")
+    elif data_mode == "synthetic":
+        expected_start = pd.Timestamp(SYNTHETIC_HISTORICAL_START)
+        expected_end = pd.Timestamp(SYNTHETIC_HISTORICAL_END)
+    else:
+        raise ValueError("data_mode must be genuine or synthetic")
+    expected_rows = int((expected_end - expected_start) / pd.Timedelta(hours=1))
     if (
-        frame.empty
-        or frame.index.min() < historical_start
-        or frame.index.max() >= historical_end
+        len(frame) != expected_rows
+        or frame.index[0] != expected_start
+        or frame.index[-1] != expected_end - pd.Timedelta(hours=1)
     ):
-        raise ValueError(f"{symbol} timestamps must stay within historical bounds")
+        raise ValueError(f"{symbol} must have exact {data_mode} coverage")
 
 
 def _eligible_regime_mask(
@@ -149,25 +166,29 @@ def _cross_regime_row(
     }
 
 
-def _transfer_changes(rows: list[dict]) -> list[dict]:
+def _deterministic_transfer_changes(rows: list[dict]) -> list[dict]:
     indexed = {
         (row["train_regime"], row["test_regime"], row["model"]): row
         for row in rows
     }
     changes = []
     for train_regime, opposite in (("low", "high"), ("high", "low")):
-        for model in ("logistic_regression", "cnn_lstm"):
-            matching = indexed[(train_regime, train_regime, model)]["macro_f1_mean"]
-            transferred = indexed[(train_regime, opposite, model)]["macro_f1_mean"]
-            changes.append(
-                {
-                    "train_regime": train_regime,
-                    "model": model,
-                    "matching_test_regime": train_regime,
-                    "opposite_test_regime": opposite,
-                    "macro_f1_change": float(transferred - matching),
-                }
-            )
+        model = "logistic_regression"
+        matching = indexed[(train_regime, train_regime, model)]["macro_f1_mean"]
+        transferred = indexed[(train_regime, opposite, model)]["macro_f1_mean"]
+        change = float(transferred - matching)
+        changes.append(
+            {
+                "train_regime": train_regime,
+                "model": model,
+                "matching_test_regime": train_regime,
+                "opposite_test_regime": opposite,
+                "seed_count": 1,
+                "macro_f1_change": change,
+                "macro_f1_change_mean": change,
+                "macro_f1_change_std": 0.0,
+            }
+        )
     return changes
 
 
@@ -185,6 +206,7 @@ def run_historical_stage(
         raise ValueError("seeds must be unique values drawn from 42, 43, and 44")
     if not dry_run and seeds != SEEDS:
         raise ValueError("genuine historical evaluation requires seeds 42, 43, and 44")
+    data_mode = "synthetic" if dry_run else "genuine"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +215,9 @@ def run_historical_stage(
         if dry_run:
             # One thousand rows keep the fixture fast while placing both low and
             # high volatility observations in every transfer split.
-            raw_frames[symbol] = _synthetic_ohlcv(symbol, periods=1000)
+            raw_frames[symbol] = _synthetic_ohlcv(
+                symbol, periods=SYNTHETIC_HISTORICAL_ROWS
+            )
         else:
             raw_frames[symbol] = fetch_klines(
                 symbol,
@@ -202,7 +226,7 @@ def run_historical_stage(
                 cache_path=Path("data/raw")
                 / f"{symbol}_1h_{HISTORICAL_START}_{HISTORICAL_END}.csv",
             )
-        _validate_hourly_frame(symbol, raw_frames[symbol])
+        _validate_hourly_frame(symbol, raw_frames[symbol], data_mode=data_mode)
 
     feature_frames = {
         symbol: engineer_features(frame) for symbol, frame in raw_frames.items()
@@ -264,6 +288,7 @@ def run_historical_stage(
     selected_validation_loss = global_runs[selected_index]["validation_loss"]
 
     cross_rows = []
+    cnn_seed_metrics: dict[tuple[str, str], dict[int, dict]] = {}
     for train_regime, test_regime in transfer_pairs():
         masks = {
             "train": regimes["train"] == train_regime,
@@ -293,23 +318,35 @@ def run_historical_stage(
             )
         )
 
-        cnn_metrics = []
+        pair_seed_metrics = {}
         for seed in seeds:
             pair_result = train_model(subset, _training_config(seed, epochs, dry_run))
-            cnn_metrics.append(
-                classification_metrics(subset.y_test, pair_result.test_predictions)
+            pair_seed_metrics[seed] = classification_metrics(
+                subset.y_test, pair_result.test_predictions
             )
+        cnn_seed_metrics[(train_regime, test_regime)] = pair_seed_metrics
         cross_rows.append(
             _cross_regime_row(
                 train_regime,
                 test_regime,
                 "cnn_lstm",
-                cnn_metrics,
+                list(pair_seed_metrics.values()),
                 subset.y_test,
             )
         )
 
     slices = _merge_global_slices(baseline_slices, cnn_slices_by_seed)
+    paired_cnn_changes = paired_transfer_changes(cnn_seed_metrics)
+    expected_source_start = (
+        SYNTHETIC_HISTORICAL_START
+        if dry_run
+        else f"{HISTORICAL_START}T00:00:00Z"
+    )
+    expected_source_end = (
+        SYNTHETIC_HISTORICAL_END
+        if dry_run
+        else f"{HISTORICAL_END}T00:00:00Z"
+    )
     results = {
         "configuration": {
             "symbols": list(SYMBOLS),
@@ -318,6 +355,7 @@ def run_historical_stage(
             "prospective_start": PROSPECTIVE_START,
             "prospective_end": PROSPECTIVE_END,
             "prospective_revealed": False,
+            "data_mode": data_mode,
             "window_hours": 96,
             "feature_count": len(FEATURE_COLUMNS),
             "regime_lookback_hours": thresholds.lookback,
@@ -326,6 +364,17 @@ def run_historical_stage(
             "dry_run": bool(dry_run),
         },
         "data": {
+            "source_coverage": {
+                "start": expected_source_start,
+                "end_exclusive": expected_source_end,
+                "expected_rows_per_symbol": int(
+                    (
+                        pd.Timestamp(expected_source_end)
+                        - pd.Timestamp(expected_source_start)
+                    )
+                    / pd.Timedelta(hours=1)
+                ),
+            },
             "raw_rows": {symbol: int(len(frame)) for symbol, frame in raw_frames.items()},
             "train_samples": int(len(bundle.y_train)),
             "validation_samples": int(len(bundle.y_val)),
@@ -353,7 +402,24 @@ def run_historical_stage(
         },
         "cross_regime_evaluation": {
             "rows": cross_rows,
-            "transfer_macro_f1_changes": _transfer_changes(cross_rows),
+            "cnn_seed_metrics": [
+                {
+                    "train_regime": train_regime,
+                    "test_regime": test_regime,
+                    "seeds": [
+                        {"seed": seed, "metrics": metrics}
+                        for seed, metrics in sorted(
+                            cnn_seed_metrics[(train_regime, test_regime)].items()
+                        )
+                    ],
+                }
+                for train_regime, test_regime in transfer_pairs()
+            ],
+            "paired_cnn_transfer_macro_f1_changes": paired_cnn_changes,
+            "transfer_macro_f1_changes": [
+                *_deterministic_transfer_changes(cross_rows),
+                *paired_cnn_changes,
+            ],
         },
     }
     (output_dir / "historical_results.json").write_text(json.dumps(results, indent=2))
@@ -369,6 +435,7 @@ def run_historical_stage(
         config=selected_config,
         device=selected_result.device,
         validation_loss=selected_validation_loss,
+        data_mode=data_mode,
         development_start=f"{HISTORICAL_START}T00:00:00Z",
         development_end=f"{HISTORICAL_END}T00:00:00Z",
         prospective_start=PROSPECTIVE_START,

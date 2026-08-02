@@ -19,7 +19,7 @@ from src.persistence import (
 from src.training import TrainConfig
 
 
-def _manifest() -> FrozenManifest:
+def _manifest(data_mode: str = "genuine") -> FrozenManifest:
     return create_frozen_manifest(
         feature_names=list(FEATURE_COLUMNS),
         window=96,
@@ -33,6 +33,7 @@ def _manifest() -> FrozenManifest:
         config=TrainConfig(seed=42),
         device="cpu",
         validation_loss=1.0,
+        data_mode=data_mode,
     )
 
 
@@ -47,8 +48,10 @@ def _artifacts() -> tuple[np.ndarray, dict[str, torch.Tensor], object]:
     return features, state, fit_baseline_models(features, labels)
 
 
-def _save_valid_package(tmp_path) -> tuple[FrozenManifest, np.ndarray, dict[str, torch.Tensor], object]:
-    manifest = _manifest()
+def _save_valid_package(
+    tmp_path, data_mode: str = "genuine"
+) -> tuple[FrozenManifest, np.ndarray, dict[str, torch.Tensor], object]:
+    manifest = _manifest(data_mode=data_mode)
     features, state, baselines = _artifacts()
     save_frozen_package(tmp_path, manifest, state, baselines)
     return manifest, features, state, baselines
@@ -102,6 +105,7 @@ def test_manifest_factory_records_actual_non_default_training_run(tmp_path) -> N
         config=config,
         device="mps",
         validation_loss=0.4,
+        data_mode="genuine",
     )
     _, state, baselines = _artifacts()
     save_frozen_package(tmp_path, manifest, state, baselines)
@@ -113,6 +117,13 @@ def test_manifest_factory_records_actual_non_default_training_run(tmp_path) -> N
     assert loaded_manifest.training_learning_rate == 0.005
     assert loaded_manifest.training_patience == 2
     assert loaded_manifest.training_device == "mps"
+
+
+def test_load_rejects_synthetic_package_when_genuine_mode_is_expected(tmp_path) -> None:
+    _save_valid_package(tmp_path, data_mode="synthetic")
+
+    with pytest.raises(ValueError, match="data mode"):
+        load_frozen_package(tmp_path, expected_data_mode="genuine")
 
 
 def test_safe_inference_rejects_reordered_feature_names(tmp_path) -> None:
@@ -160,6 +171,7 @@ def test_load_rejects_state_shape_mismatch(tmp_path) -> None:
         {"model_hidden_size": 47},
         {"training_seed": 43},
         {"validation_loss": -0.1},
+        {"data_mode": "dry_run"},
         {"library_versions": {"python": ""}},
     ],
 )
