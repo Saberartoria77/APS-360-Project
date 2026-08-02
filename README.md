@@ -4,16 +4,26 @@ An APS360 project studying the feasibility and robustness of next-hour BTC/ETH d
 
 ## Final evaluation
 
+The genuine July evaluation is complete and sealed. Do **not** run the genuine
+`historical` or `prospective` commands against `artifacts/final/` again. The durable
+`.prospective-reveal.json` marker makes a second reveal fail before data access, and
+`prospective_artifact_index.json` binds the saved JSON, CSV, and figures by SHA-256.
+
+For a network-free smoke test, use a new output directory each time:
+
 ```bash
-python run_final_experiment.py historical --output-dir artifacts/final --epochs 12
-python run_final_experiment.py prospective --output-dir artifacts/final
+python run_final_experiment.py historical --output-dir /tmp/aps360-final-dry --dry-run --epochs 1
+python run_final_experiment.py prospective --output-dir /tmp/aps360-final-dry --dry-run
 ```
 
-The prospective command requires the frozen package created by the historical command and scores only July 2026 forecast origins. Run historical first, commit or otherwise freeze its manifest and result evidence, and do not rerun prospective as a tuning loop.
+The prospective command requires the frozen package created by the historical command and scores only July 2026 forecast origins. Synthetic and genuine state cannot share an output directory. The maintenance-only `recompute-transfer` stage reads pre-July caches and can replace only the historical transfer JSON/CSV; it never loads prospective data or saves frozen weights.
 
 The genuine frozen CNN-LSTM reached 0.409 macro-F1 and 0.489 accuracy on 1,488 July targets. Its historical three-seed macro-F1 was $0.429\pm0.004$; explicit low/high regime transfer produced negative paired changes in both directions. See `final_report.pdf` for definitions, baselines, uncertainty, limitations, and the full interpretation.
 
-The report-ready evidence is stored under `artifacts/final/`: the frozen manifest, historical and prospective JSON, cross-regime CSV, qualitative examples, and final figures.
+The report-ready evidence is stored under `artifacts/final/`: the frozen manifest,
+the committed `frozen/cnn_lstm.pt` and `frozen/baselines.npz` checkpoints,
+historical and prospective JSON, cross-regime CSV, qualitative examples, artifact
+index, reveal marker, and final figures.
 
 To compile the four-page course report plus references:
 

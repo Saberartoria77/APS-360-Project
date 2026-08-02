@@ -164,6 +164,12 @@ def test_readme_documents_final_evaluation_artifacts() -> None:
     ]:
         assert required in text
     assert "deferred to the final project" not in text.lower()
+    assert "frozen/cnn_lstm.pt" in text
+    assert "frozen/baselines.npz" in text
+    assert ".prospective-reveal.json" in text
+    assert "prospective_artifact_index.json" in text
+    assert "--dry-run" in text
+    assert "recompute-transfer" in text
 
 
 def test_final_report_has_four_main_pages_plus_references() -> None:
