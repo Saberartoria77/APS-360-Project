@@ -1,0 +1,27 @@
+{
+  "schema_version": "prospective-artifact-index-v1",
+  "data_mode": "genuine",
+  "archival_correction": true,
+  "artifacts": {
+    "prospective_results.json": {
+      "sha256": "5b0cca2c744e1e6940934a5124064db71553ff7db06819bbaba8de8defd69585",
+      "size_bytes": 15303
+    },
+    "qualitative_examples.csv": {
+      "sha256": "f427dc02c45fe9c03b484410f585c728bb68ca76c0663ad744ab571e7bd687d7",
+      "size_bytes": 919
+    },
+    "figures/regime_performance.png": {
+      "sha256": "d80f59546d82cdd4dd0a21c59220fc33432dfa2f1442014e346a8e992556555c",
+      "size_bytes": 35755
+    },
+    "figures/prospective_confusion.png": {
+      "sha256": "c3ecd8ee3b5c5bce450b0c2c9373930123d4fee2b95bece82b1e7a7f5db1cfd5",
+      "size_bytes": 26689
+    },
+    "figures/model_regime_diagram.png": {
+      "sha256": "1b18a830a0f08eebcaabfcc70b40017ad098f67db48f53c352a0f7789cf0fe31",
+      "size_bytes": 69915
+    }
+  }
+}

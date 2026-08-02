@@ -1,0 +1,8 @@
+{
+  "schema_version": "prospective-reveal-v1",
+  "data_mode": "genuine",
+  "status": "revealed",
+  "archival_correction": true,
+  "original_historical_freeze_commit": "c547192b20e1d7648c961c1fafb22e59a0687f5d",
+  "note": "Post-reveal marker added after independent verification; it does not claim presence in the original freeze commit."
+}

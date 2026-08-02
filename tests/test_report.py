@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+from src.persistence import sha256_file
+
 
 def test_report_has_required_sections() -> None:
     text = Path("progress_report.tex").read_text()
@@ -169,3 +171,28 @@ def test_final_report_has_four_main_pages_plus_references() -> None:
     assert len(reader.pages) == 5
     assert "Discussion" in (reader.pages[3].extract_text() or "")
     assert "References" in (reader.pages[4].extract_text() or "")
+
+
+def test_genuine_prospective_archival_correction_is_digest_bound() -> None:
+    output = Path("artifacts/final")
+    result = json.loads((output / "prospective_results.json").read_text())
+    provenance = result["archival_provenance"]
+    assert provenance == {
+        "correction_type": "post-reveal archival correction",
+        "recorded_after_reveal": True,
+        "original_historical_freeze_commit": "c547192b20e1d7648c961c1fafb22e59a0687f5d",
+        "verification": "exact agreement with every saved July metric and qualitative row",
+        "cnn_sha256": "670265c722336bfd4c1fb4d0ac035ed4fad9a657427f3d26733f96f433ffced6",
+        "baselines_sha256": "8cb39d6b8ab30c7482ed83ebc0d4840f52c6bff5591f2089cd29ba2dcf59f84f",
+    }
+    marker = json.loads((output / ".prospective-reveal.json").read_text())
+    assert marker["data_mode"] == "genuine"
+    assert marker["archival_correction"] is True
+    index = json.loads((output / "prospective_artifact_index.json").read_text())
+    assert index["data_mode"] == "genuine"
+    for relative_path, binding in index["artifacts"].items():
+        artifact = output / relative_path
+        assert binding == {
+            "sha256": sha256_file(artifact),
+            "size_bytes": artifact.stat().st_size,
+        }

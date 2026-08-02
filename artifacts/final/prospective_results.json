@@ -1,4 +1,12 @@
 {
+  "archival_provenance": {
+    "correction_type": "post-reveal archival correction",
+    "recorded_after_reveal": true,
+    "original_historical_freeze_commit": "c547192b20e1d7648c961c1fafb22e59a0687f5d",
+    "verification": "exact agreement with every saved July metric and qualitative row",
+    "cnn_sha256": "670265c722336bfd4c1fb4d0ac035ed4fad9a657427f3d26733f96f433ffced6",
+    "baselines_sha256": "8cb39d6b8ab30c7482ed83ebc0d4840f52c6bff5591f2089cd29ba2dcf59f84f"
+  },
   "configuration": {
     "prospective_revealed": true,
     "data_mode": "genuine",
