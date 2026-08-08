@@ -31,30 +31,30 @@
 \small
 
 \section{Introduction}
-\textbf{Main result.} A frozen CNN--LSTM attained prospective macro-F1 $0.409$ and accuracy $0.489$
-on 1,488 genuinely unseen BTC/ETH forecast origins in July 2026. Its historical test macro-F1 was
-$0.429\pm0.004$ across three seeds, and explicit regime transfer reduced macro-F1 by
-$0.081\pm0.005$ (low$\rightarrow$high) and $0.057\pm0.005$ (high$\rightarrow$low). Thus the model
-retained some balanced classification ability on new data but was not regime-invariant. Macro-F1 is
-the unweighted mean of the three class F1 scores; accuracy is the overall correct fraction.
+\textbf{Main result.} On 1,488 BTC/ETH forecast origins from July 2026 that were not used for
+development, the frozen CNN--LSTM reached macro-F1 $0.409$ and accuracy $0.489$. Its historical test macro-F1 was
+$0.429\pm0.004$ across three seeds. When I trained on one volatility regime and tested on the other,
+macro-F1 fell by $0.081\pm0.005$ (low$\rightarrow$high) and $0.057\pm0.005$
+(high$\rightarrow$low). The model learned useful directional patterns, but those patterns did not
+transfer evenly across volatility regimes. Macro-F1 is the unweighted mean of the three class F1
+scores; accuracy is the overall correct fraction.
 
-The goal is to predict whether the next-hour close return for BTCUSDT or ETHUSDT is \emph{down},
-\emph{flat}, or \emph{up}, and to quantify how performance changes with volatility. This is difficult
-and useful as a robustness study because crypto markets are noisy, imbalanced, and non-stationary.
-Machine learning is appropriate for testing multivariate nonlinear temporal associations; convolution
-can detect local motifs while an LSTM can retain longer dependencies. The study does not infer
-causality or trading profitability.
+This project predicts whether the next-hour close return for BTCUSDT or ETHUSDT is \emph{down},
+\emph{flat}, or \emph{up}, then asks how the predictions change with volatility. The task is difficult
+because crypto returns are noisy, the classes are imbalanced, and market behaviour changes over time.
+A convolutional layer can summarize short local patterns, while an LSTM can carry information across
+the full input window. The study tests predictive associations, not causality or trading profitability.
 
 \subsection{Related Work}
 Fischer and Krauss benchmarked LSTMs against memory-free classifiers for equity direction and found
 that performance varied across sub-periods \citep{fischer2018deep}. Nelson et al. used technical
 indicators with an LSTM for stock movement classification \citep{nelson2017stock}, while Ghosh et
 al. compared LSTMs and random forests on out-of-sample intraday directions
-\citep{ghosh2020forecasting}. At cryptocurrency scale, Zhao modeled short-horizon movement from
+\citep{ghosh2020forecasting}. For cryptocurrency data, Zhao modeled short-horizon movement from
 trade-by-trade sequences \citep{zhao2021deep}. Guo et al. combined multiscale residual convolution
-and LSTM components for Bitcoin price forecasting \citep{guo2021mrclstm}. These works motivate
-sequence learning and simple baselines; this project instead emphasizes causal volatility slicing,
-paired cross-regime transfer, three-seed uncertainty, and a pre-committed future month.
+and LSTM components for Bitcoin price forecasting \citep{guo2021mrclstm}. Together, these studies
+motivate sequence models and strong simple baselines. My evaluation adds causal volatility slices,
+paired cross-regime transfer, three training seeds, and a future month fixed before it was examined.
 
 \begin{figure}[!h]
   \centering
@@ -70,7 +70,7 @@ paired cross-regime transfer, three-seed uncertainty, and a pre-committed future
 \section{Data Processing}
 Binance public hourly OHLCV klines cover July 1, 2023 00:00 UTC through June 30, 2026 23:00 UTC:
 26,304 rows per asset (52,608 total). Timestamps were converted to UTC, sorted, deduplicated, and
-required to be hourly contiguous. Thirteen causal features were computed: simple/log returns,
+required to be hourly contiguous. Thirteen causal features were computed: simple and log returns,
 high--low range, close--open return, volume change, RSI(14), MACD(12,26,9), Bollinger position and
 width(20), 24-hour volatility, and 24-hour volume z-score. A sample at forecast origin $t$ contains
 the preceding 96 hourly feature rows through $t$; its label uses the close return from $t$ to $t+1$.
@@ -113,7 +113,8 @@ a no-signal prior, a parameter-free heuristic, and a fast memory-free learned co
 \section{Quantitative Results}
 Table~\ref{tab:overall} reports the two final evaluation periods. Historical CNN values are
 mean$\pm$population standard deviation over seeds 42--44; deterministic baselines and the frozen
-prospective seed are single evaluations. Macro-F1 is primary because flat is the largest class.
+prospective seed are single evaluations. I use macro-F1 as the primary metric because flat is the
+largest class.
 
 \begin{table}[!h]
 \centering
@@ -134,11 +135,11 @@ CNN--LSTM & $0.429\pm0.004$ & $0.450\pm0.005$ & \textbf{0.409} & 0.489\\
 \end{tabular}
 \end{table}
 
-Historically, the CNN matched logistic regression on macro-F1 but not accuracy. Its recalls were
+On the historical test, the CNN matched logistic regression on macro-F1 but not accuracy. Its recalls were
 $0.383/0.514/0.398$ (down/flat/up), more balanced than logistic regression's
-$0.271/0.656/0.366$. In July, CNN recalls were $0.368/0.627/0.244$: up recall weakened, yet CNN
-remained the strongest model by macro-F1. Majority accuracy rose only because 853/1,488 July labels
-were flat, demonstrating why accuracy alone is misleading.
+$0.271/0.656/0.366$. In July, CNN recalls were $0.368/0.627/0.244$: up recall weakened, but the CNN
+still had the best macro-F1. The majority baseline obtained high accuracy mainly because 853 of 1,488
+July labels were flat, which is why accuracy alone gives an incomplete picture.
 
 \begin{figure}[!h]
   \centering
@@ -149,49 +150,52 @@ were flat, demonstrating why accuracy alone is misleading.
   \label{fig:regimes}
 \end{figure}
 
-Figure~\ref{fig:regimes} shows a monotonic prospective deterioration for the CNN, but not every
-baseline; the result supports sensitivity, not a universal causal effect of volatility. Historical
+The CNN declined monotonically across the prospective regimes, although not every baseline did.
+This is evidence of sensitivity to volatility, not a universal causal effect. Historical
 global CNN macro-F1 was 0.409/0.413/0.379 for low/medium/high ($n=2{,}033/3{,}240/2{,}429$).
-More directly, CNNs trained only on low regimes scored $0.381\pm0.006$ on low versus
+The paired transfer experiment showed the same weakness: CNNs trained only on low regimes scored
+$0.381\pm0.006$ on low versus
 $0.300\pm0.001$ on high, a paired change of $-0.081\pm0.005$. High-trained CNNs scored
 $0.409\pm0.005$ on high versus $0.352\pm0.001$ on low, a change of $-0.057\pm0.005$.
-Logistic changes were $-0.063$ and $-0.071$. The consistent negative paired changes are the clearest
-evidence of regime-dependent generalization.
+Logistic changes were $-0.063$ and $-0.071$. In this study, these paired drops provide the strongest
+evidence that performance depends on the training regime.
 
 \newpage
 \section{Qualitative Results}
-Examples were selected mechanically as the highest-confidence correct prediction and error in each
-non-empty July regime, preventing editorial cherry-picking. In low volatility, the strongest correct
+I selected examples using a fixed rule: the highest-confidence correct prediction and error in each
+non-empty July regime. In low volatility, the strongest correct
 case was BTC flat at 88.6\% confidence (July 18 11:00 UTC), while the strongest error predicted flat
 at 87.2\% for an actual BTC down move (July 25 04:00). Medium-regime examples repeated this pattern:
 an 85.0\%-confidence correct flat and an 81.7\%-confidence false flat. In high volatility, confidence
 was lower: an ETH down prediction was correct at 50.1\%, while another down prediction missed an up
-move at 48.9\%. These cases align with the quantitative finding that the model can be confidently
-biased toward flat in quieter periods and struggles to separate directions during rare high volatility.
+move at 48.9\%. This small set illustrates the same pattern as the aggregate results: the model can be
+confidently biased toward flat in quieter periods and struggles to separate directions during rare high
+volatility.
 
 \section{New Data}
-The historical command trained all models, selected seed 43 by validation loss, froze CNN weights,
-baselines, scaling, label/regime thresholds, feature order, and the exact July interval, and was
-committed before July was fetched. Only then was the prospective command executed once. It used
+Before looking at July, I trained the models, selected seed 43 by validation loss, and froze the CNN
+weights, baselines, scaling, label/regime thresholds, feature order, and exact July interval. I committed
+that state before fetching July data, then ran the prospective command once. It used
 June 24--30 solely as causal context and scored exactly 744 origins per asset from July 1 00:00
 through July 31 23:00 UTC; the August 1 00:00 close resolves the last label. The 1,488 targets had
-307/853/328 classes and 1,005/408/75 low/medium/high regimes. No prospective-dependent correction,
-selection, retraining, or rerun was performed. The decline from historical CNN macro-F1 0.429 to
-0.409 weakens the historical performance level, while its advantage over July baselines supports a
-limited claim of prospective balanced classification. It does not establish profitability.
+307/853/328 classes and 1,005/408/75 low/medium/high regimes. After seeing the July scores, I did not
+change the model, retune it, or run the prospective evaluation again. The CNN's macro-F1 declined from
+0.429 historically to 0.409 in July, so the historical performance did not fully carry over. However, the CNN still
+had the best July macro-F1 among the tested models. This supports a narrow claim about next-hour
+classification, not profitability.
 
 \section{Discussion}
-The central finding is not that the hybrid model dominates: historically it only tied logistic
-regression on macro-F1, and majority prediction won July accuracy. Rather, temporal modeling
-distributed recall more evenly and achieved the best July macro-F1, while both explicit transfer and
-the prospective regime slices exposed instability. The asymmetric errors are informative: low-trained
-models lose flat recall in high volatility, whereas high-trained models transferred to low volatility
-over-predict flat. This suggests distribution-specific class boundaries rather than a stable directional
-mechanism. The project is challenging because returns are noisy, labels overlap around a learned
-threshold, and both asset dynamics and class balance shift over time.
+The hybrid model did not dominate every comparison: it only tied logistic regression on historical
+macro-F1, and the majority baseline won July accuracy. Its advantage was more even recall across the
+three classes, which gave it the best July macro-F1. At the same time, both transfer directions and the
+prospective regime slices showed that this advantage was unstable. Low-trained models lost flat recall
+in high volatility, while high-trained models over-predicted flat after transfer to low volatility. I read
+this as evidence that the learned class boundaries changed with the data distribution, rather than as a
+stable market mechanism. The main difficulty is that returns are noisy, labels meet at a learned
+threshold, and both asset behaviour and class balance shift over time.
 
-\tighthead{Limitations and future work.} Three seeds quantify optimization variability but not
-sampling uncertainty; only two assets and one future month were tested, with just 75 high-volatility
+\tighthead{Limitations and future work.} Three seeds show optimization variability but not sampling
+uncertainty. I tested only two assets and one future month, with just 75 high-volatility
 July samples. Technical indicators omit order-book, macroeconomic, and sentiment information.
 Future work should register multiple future months, add confidence intervals or block-bootstrap tests,
 study calibration, and compare rolling retraining under a pre-declared protocol. Any trading study
